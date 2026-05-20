@@ -339,6 +339,14 @@ const extractToolCallFromSourceText = (
 	return inferMalformedXMLToolCall(sourceText, toolId, toolOfToolName)
 }
 
+const toolCallCompletenessScore = (toolCall: RawToolCallObj | undefined): number => {
+	if (!toolCall) return -1
+	const doneParamsScore = toolCall.doneParams.length * 10_000
+	const rawContentScore = Object.values(toolCall.rawParams).reduce((sum, value) => sum + (value?.length ?? 0), 0)
+	const doneBonus = toolCall.isDone ? 1 : 0
+	return doneParamsScore + rawContentScore + doneBonus
+}
+
 export const extractXMLToolsWrapper = (
 	onText: OnText,
 	onFinalMessage: OnFinalMessage,
@@ -361,6 +369,7 @@ export const extractXMLToolsWrapper = (
 	let trueFullText = ''
 	let trueFullReasoning = ''
 	let latestToolCall: RawToolCallObj | undefined = undefined
+	let bestToolCallSeen: RawToolCallObj | undefined = undefined
 
 	let foundOpenTag: { idx: number, toolName: ToolName } | null = null
 	let openToolTagBuffer = '' // the characters we've seen so far that come after a < with no space afterwards, not yet added to fullText
@@ -420,6 +429,9 @@ export const extractXMLToolsWrapper = (
 				latestToolCall = reasoningToolCall.toolCall
 			}
 		}
+		if (toolCallCompletenessScore(latestToolCall) > toolCallCompletenessScore(bestToolCallSeen)) {
+			bestToolCallSeen = latestToolCall
+		}
 
 		onText({
 			...params,
@@ -434,7 +446,7 @@ export const extractXMLToolsWrapper = (
 		newOnText({ ...params })
 
 		fullText = fullText.trimEnd()
-		let toolCall = latestToolCall
+		let toolCall = toolCallCompletenessScore(bestToolCallSeen) > toolCallCompletenessScore(latestToolCall) ? bestToolCallSeen : latestToolCall
 		let fullReasoning = params.fullReasoning
 
 		if (!toolCall || Object.keys(toolCall.rawParams).length === 0) {
@@ -450,6 +462,9 @@ export const extractXMLToolsWrapper = (
 				fullReasoning = inferredFromReasoning.displayText
 				toolCall = inferredFromReasoning.toolCall
 			}
+		}
+		if (toolCallCompletenessScore(bestToolCallSeen) > toolCallCompletenessScore(toolCall)) {
+			toolCall = bestToolCallSeen
 		}
 
 		// console.log('final message!!!', trueFullText)

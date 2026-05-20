@@ -19,6 +19,7 @@ import { RawToolParamsObj } from '../common/sendLLMMessageTypes.js'
 import { MAX_CHILDREN_URIs_PAGE, MAX_FILE_CHARS_PAGE, MAX_TERMINAL_BG_COMMAND_TIME, MAX_TERMINAL_INACTIVE_TIME } from '../common/prompt/prompts.js'
 import { IVoidSettingsService } from '../common/voidSettingsService.js'
 import { generateUuid } from '../../../../base/common/uuid.js'
+import { extractSearchReplaceBlocks } from '../common/helpers/extractCodeFromResult.js'
 
 
 // tool use for AI
@@ -260,6 +261,9 @@ export class ToolsService implements IToolsService {
 				const { uri: uriStr, search_replace_blocks: searchReplaceBlocksUnknown } = params
 				const uri = validateURI(uriStr)
 				const searchReplaceBlocks = validateStr('searchReplaceBlocks', searchReplaceBlocksUnknown)
+				if (extractSearchReplaceBlocks(searchReplaceBlocks).length === 0) {
+					throw new Error(`Invalid LLM output format: searchReplaceBlocks must contain at least one valid SEARCH/REPLACE block.`)
+				}
 				return { uri, searchReplaceBlocks }
 			},
 
