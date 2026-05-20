@@ -260,6 +260,85 @@ const parseXMLPrefixToToolCall = <T extends ToolName,>(toolName: T, toolId: stri
 	}
 }
 
+const inferMalformedXMLToolCall = (
+	fullText: string,
+	toolId: string,
+	toolOfToolName: ToolOfToolName,
+): { displayText: string, toolCall: RawToolCallObj } | null => {
+	let bestMatch: { startIdx: number, toolName: ToolName } | null = null
+
+	for (const toolName_ in toolOfToolName) {
+		const toolName = toolName_ as ToolName
+		const tool = toolOfToolName[toolName]
+		if (!tool) continue
+
+		const openToolTag = `<${toolName}>`
+		if (fullText.includes(openToolTag)) continue
+
+		const closeToolTag = `</${toolName}>`
+		const closeToolTagIdx = fullText.indexOf(closeToolTag)
+		if (closeToolTagIdx === -1) continue
+		if (fullText.substring(closeToolTagIdx + closeToolTag.length).trim() !== '') continue
+
+		const allowedParams = Object.keys(tool.params)
+		let firstParamIdx = -1
+		for (const paramName of allowedParams) {
+			const paramIdx = fullText.indexOf(`<${paramName}>`)
+			if (paramIdx === -1) continue
+			if (firstParamIdx === -1 || paramIdx < firstParamIdx) {
+				firstParamIdx = paramIdx
+			}
+		}
+		if (firstParamIdx === -1) continue
+
+		if (bestMatch === null || firstParamIdx < bestMatch.startIdx) {
+			bestMatch = { startIdx: firstParamIdx, toolName }
+		}
+	}
+
+	if (bestMatch === null) return null
+
+	const malformedToolText = fullText.substring(bestMatch.startIdx)
+	const toolCall = parseXMLPrefixToToolCall(
+		bestMatch.toolName,
+		toolId,
+		`<${bestMatch.toolName}>${malformedToolText}`,
+		toolOfToolName,
+	)
+
+	if (Object.keys(toolCall.rawParams).length === 0) return null
+
+	return {
+		displayText: fullText.substring(0, bestMatch.startIdx).trimEnd(),
+		toolCall,
+	}
+}
+
+const extractToolCallFromSourceText = (
+	sourceText: string,
+	toolId: string,
+	toolOfToolName: ToolOfToolName,
+): { displayText: string, toolCall: RawToolCallObj } | null => {
+	const toolOpenTags = Object.keys(toolOfToolName).map(toolName => `<${toolName}>`)
+
+	const exactMatch = findIndexOfAny(sourceText, toolOpenTags)
+	if (exactMatch !== null) {
+		const [idx, toolTag] = exactMatch
+		const toolName = toolTag.substring(1, toolTag.length - 1) as ToolName
+		return {
+			displayText: sourceText.substring(0, idx).trimEnd(),
+			toolCall: parseXMLPrefixToToolCall(
+				toolName,
+				toolId,
+				sourceText.substring(idx, Infinity),
+				toolOfToolName,
+			)
+		}
+	}
+
+	return inferMalformedXMLToolCall(sourceText, toolId, toolOfToolName)
+}
+
 export const extractXMLToolsWrapper = (
 	onText: OnText,
 	onFinalMessage: OnFinalMessage,
@@ -280,6 +359,7 @@ export const extractXMLToolsWrapper = (
 	// detect <availableTools[0]></availableTools[0]>, etc
 	let fullText = '';
 	let trueFullText = ''
+	let trueFullReasoning = ''
 	let latestToolCall: RawToolCallObj | undefined = undefined
 
 	let foundOpenTag: { idx: number, toolName: ToolName } | null = null
@@ -290,6 +370,7 @@ export const extractXMLToolsWrapper = (
 		const newText = params.fullText.substring(prevFullTextLen)
 		prevFullTextLen = params.fullText.length
 		trueFullText = params.fullText
+		trueFullReasoning = params.fullReasoning
 
 		// console.log('NEWTEXT', JSON.stringify(newText))
 
@@ -333,6 +414,12 @@ export const extractXMLToolsWrapper = (
 				toolOfToolName,
 			)
 		}
+		else {
+			const reasoningToolCall = extractToolCallFromSourceText(trueFullReasoning, toolId, toolOfToolName)
+			if (reasoningToolCall) {
+				latestToolCall = reasoningToolCall.toolCall
+			}
+		}
 
 		onText({
 			...params,
@@ -347,14 +434,30 @@ export const extractXMLToolsWrapper = (
 		newOnText({ ...params })
 
 		fullText = fullText.trimEnd()
-		const toolCall = latestToolCall
+		let toolCall = latestToolCall
+		let fullReasoning = params.fullReasoning
+
+		if (!toolCall || Object.keys(toolCall.rawParams).length === 0) {
+			const inferred = extractToolCallFromSourceText(trueFullText, toolId, toolOfToolName)
+			if (inferred) {
+				fullText = inferred.displayText
+				toolCall = inferred.toolCall
+			}
+		}
+		if ((!toolCall || Object.keys(toolCall.rawParams).length === 0) && trueFullReasoning) {
+			const inferredFromReasoning = extractToolCallFromSourceText(trueFullReasoning, toolId, toolOfToolName)
+			if (inferredFromReasoning) {
+				fullReasoning = inferredFromReasoning.displayText
+				toolCall = inferredFromReasoning.toolCall
+			}
+		}
 
 		// console.log('final message!!!', trueFullText)
 		// console.log('----- returning ----\n', fullText)
 		// console.log('----- tools ----\n', JSON.stringify(firstToolCallRef.current, null, 2))
 		// console.log('----- toolCall ----\n', JSON.stringify(toolCall, null, 2))
 
-		onFinalMessage({ ...params, fullText, toolCall: toolCall })
+		onFinalMessage({ ...params, fullText, fullReasoning, toolCall: toolCall })
 	}
 	return { newOnText, newOnFinalMessage };
 }

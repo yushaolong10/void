@@ -13,6 +13,11 @@ if (!process.env['VSCODE_SKIP_NODE_VERSION_CHECK']) {
 		console.error('\x1b[1;31m*** Please use Node.js v20.18.1 or later for development.\x1b[0;0m');
 		throw new Error();
 	}
+	if (majorNodeVersion > 20) {
+		console.error('\x1b[1;31m*** This repo currently supports Node.js 20.x only for development and packaging.\x1b[0;0m');
+		console.error('\x1b[1;31m*** Detected Node.js %s. Please run `nvm use` to switch to the version in .nvmrc before running npm install or packaging tasks.\x1b[0;0m', process.versions.node);
+		throw new Error();
+	}
 }
 
 if (process.env['npm_execpath'].includes('yarn')) {

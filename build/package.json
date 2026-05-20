@@ -2,6 +2,10 @@
   "name": "code-oss-dev-build",
   "version": "1.0.0",
   "license": "MIT",
+  "engines": {
+    "node": ">=20.18.2 <21",
+    "npm": ">=10 <11"
+  },
   "devDependencies": {
     "@azure/core-auth": "^1.9.0",
     "@azure/cosmos": "^3",

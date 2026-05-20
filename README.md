@@ -34,6 +34,14 @@ Void is a fork of the [vscode](https://github.com/microsoft/vscode) repository. 
 
 For a guide on how to develop your own version of Void, see [HOW_TO_CONTRIBUTE](https://github.com/voideditor/void/blob/main/HOW_TO_CONTRIBUTE.md) and [void-builder](https://github.com/voideditor/void-builder).
 
+For a local macOS ARM packaging guide, see [MacPack](./MacPack.md).
+
+### Fixes
+
+- Agent checkpoint resume: recover malformed XML tool calls such as incomplete `read_file` outputs.
+- Agent checkpoint resume: continue tool execution when XML tool calls are emitted inside reasoning content.
+- `edit_file` matching: tolerate whitespace and comment differences when locating `ORIGINAL` blocks.
+- macOS ARM packaging: see [MacPack](./MacPack.md).
 
 
 

@@ -105,12 +105,95 @@ const removeWhitespaceExceptNewlines = (str: string): string => {
 	return str.replace(/[^\S\n]+/g, '');
 }
 
+const stripInlineComment = (line: string): string => {
+	const commentMarkers = ['//', '#', '--', '/*', '<!--']
+	let bestIdx = -1
+
+	for (const marker of commentMarkers) {
+		const idx = line.indexOf(marker)
+		if (idx <= 0) continue
+		if (!/\s/.test(line.charAt(idx - 1))) continue
+		if (bestIdx === -1 || idx < bestIdx) bestIdx = idx
+	}
+
+	return bestIdx === -1 ? line : line.substring(0, bestIdx)
+}
+
+const isCommentOnlyLine = (line: string): boolean => {
+	const trimmed = line.trim()
+	if (!trimmed) return false
+	return /^(\/\/|#|--|\/\*|\*|\*\/|<!--)/.test(trimmed)
+}
+
+const normalizeLooseMatchLine = (line: string): string => {
+	if (isCommentOnlyLine(line)) return ''
+	const withoutInlineComment = stripInlineComment(line)
+	const trimmed = withoutInlineComment.trim()
+	if (!trimmed) return ''
+	return trimmed.replace(/\s+/g, '')
+}
+
+const findTextInCode_ignoringWhitespaceAndComments = (
+	text: string,
+	fileContents: string,
+	opts: { startingAtLine?: number }
+) => {
+	const textLines = text.split('\n')
+	const fileLines = fileContents.split('\n')
+	const startingAtLine = Math.max((opts.startingAtLine ?? 1) - 1, 0)
+
+	const significantPatternLines = textLines
+		.map(normalizeLooseMatchLine)
+		.filter(line => line.length > 0)
+
+	if (significantPatternLines.length === 0) return 'Not found' as const
+
+	const candidateRanges: [number, number][] = []
+
+	for (let startLine = startingAtLine; startLine < fileLines.length; startLine += 1) {
+		if (normalizeLooseMatchLine(fileLines[startLine]) !== significantPatternLines[0]) continue
+
+		let patternIdx = 0
+		let fileLineIdx = startLine
+		let lastMatchedLine = startLine
+		let failed = false
+
+		while (fileLineIdx < fileLines.length && patternIdx < significantPatternLines.length) {
+			const normalizedFileLine = normalizeLooseMatchLine(fileLines[fileLineIdx])
+
+			if (!normalizedFileLine) {
+				fileLineIdx += 1
+				continue
+			}
+
+			if (normalizedFileLine !== significantPatternLines[patternIdx]) {
+				failed = true
+				break
+			}
+
+			lastMatchedLine = fileLineIdx
+			patternIdx += 1
+			fileLineIdx += 1
+		}
+
+		if (!failed && patternIdx === significantPatternLines.length) {
+			candidateRanges.push([startLine + 1, lastMatchedLine + 1])
+		}
+	}
+
+	if (candidateRanges.length === 0) return 'Not found' as const
+	if (candidateRanges.length > 1) return 'Not unique' as const
+	return candidateRanges[0]
+}
+
 
 
 // finds block.orig in fileContents and return its range in file
 // startingAtLine is 1-indexed and inclusive
 // returns 1-indexed lines
 const findTextInCode = (text: string, fileContents: string, canFallbackToRemoveWhitespace: boolean, opts: { startingAtLine?: number, returnType: 'lines' }) => {
+	const originalText = text
+	const originalFileContents = fileContents
 
 	const returnAns = (fileContents: string, idx: number) => {
 		const startLine = numLinesOfStr(fileContents.substring(0, idx + 1))
@@ -140,7 +223,9 @@ const findTextInCode = (text: string, fileContents: string, canFallbackToRemoveW
 	fileContents = removeWhitespaceExceptNewlines(fileContents)
 	idx = fileContents.indexOf(text, startingAtLineIdx(fileContents));
 
-	if (idx === -1) return 'Not found' as const
+	if (idx === -1) {
+		return findTextInCode_ignoringWhitespaceAndComments(originalText, originalFileContents, opts)
+	}
 	const lastIdx = fileContents.lastIndexOf(text)
 	if (lastIdx !== idx) return 'Not unique' as const
 
@@ -1598,7 +1683,7 @@ class EditCodeService extends Disposable implements IEditCodeService {
 		let descStr: string
 		switch (str) {
 			case 'Not found':
-				descStr = `The edit was not applied. The text in ORIGINAL must EXACTLY match lines of code in the file, but there was no match for:\n${problematicCode}. Ensure you have the latest version of the file, and ensure the ORIGINAL code matches a code excerpt exactly.`
+				descStr = `The edit was not applied. Void could not find a unique match for the text in ORIGINAL, even after tolerating whitespace and comment differences, for:\n${problematicCode}. Ensure you have the latest version of the file, and ensure the ORIGINAL code matches a nearby code excerpt uniquely.`
 				break
 			case 'Not unique':
 				descStr = `The edit was not applied. The text in ORIGINAL must be unique in the file being edited, but the following ORIGINAL code appears multiple times in the file:\n${problematicCode}. Ensure you have the latest version of the file, and ensure the ORIGINAL code is unique.`
@@ -2458,8 +2543,3 @@ class AcceptRejectInlineWidget extends Widget implements IOverlayWidget {
 	}
 
 }
-
-
-
-
-

@@ -66,10 +66,11 @@ export class SelectionHelperContribution extends Disposable implements IEditorCo
 			const res = mountVoidSelectionHelper(content, accessor);
 			if (!res) return;
 
-			this._reactComponentDisposable = res;
-			this._rerender = res.rerender;
+			const reactComponentDisposable = res;
+			this._reactComponentDisposable = reactComponentDisposable;
+			this._rerender = reactComponentDisposable.rerender;
 
-			this._register(this._reactComponentDisposable);
+			this._register(reactComponentDisposable);
 
 
 		});

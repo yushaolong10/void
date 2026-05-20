@@ -6,6 +6,10 @@
     "name": "Microsoft Corporation"
   },
   "license": "MIT",
+  "engines": {
+    "node": ">=20.18.2 <21",
+    "npm": ">=10 <11"
+  },
   "main": "./out/main.js",
   "type": "module",
   "private": true,
