@@ -16,7 +16,7 @@ import { computeDirectoryTree1Deep, IDirectoryStrService, stringifyDirectoryTree
 import { IMarkerService, MarkerSeverity } from '../../../../platform/markers/common/markers.js'
 import { timeout } from '../../../../base/common/async.js'
 import { RawToolParamsObj } from '../common/sendLLMMessageTypes.js'
-import { MAX_CHILDREN_URIs_PAGE, MAX_FILE_CHARS_PAGE, MAX_TERMINAL_BG_COMMAND_TIME, MAX_TERMINAL_INACTIVE_TIME } from '../common/prompt/prompts.js'
+import { MAX_CHILDREN_URIs_PAGE, MAX_FILE_CHARS_PAGE, MAX_TERMINAL_BG_COMMAND_TIME, MAX_TERMINAL_INACTIVE_TIME, MAX_TERMINAL_TOTAL_TIME } from '../common/prompt/prompts.js'
 import { IVoidSettingsService } from '../common/voidSettingsService.js'
 import { generateUuid } from '../../../../base/common/uuid.js'
 import { extractSearchReplaceBlocks } from '../common/helpers/extractCodeFromResult.js'
@@ -551,9 +551,11 @@ export class ToolsService implements IToolsService {
 				if (resolveReason.type === 'done') {
 					return `${result_}\n(exit code ${resolveReason.exitCode})`
 				}
-				// normal command
-				if (resolveReason.type === 'timeout') {
-					return `${result_}\nTerminal command ran, but was automatically killed by Void after ${MAX_TERMINAL_INACTIVE_TIME}s of inactivity and did not finish successfully. To try with more time, open a persistent terminal and run the command there.`
+				if (resolveReason.type === 'idle_timeout') {
+					return `${result_}\nTerminal command ran, but was automatically killed by Void after ${MAX_TERMINAL_INACTIVE_TIME}s of inactivity and did not finish successfully. If this command may stay quiet before producing output, open a persistent terminal and run the command there instead.`
+				}
+				if (resolveReason.type === 'total_timeout') {
+					return `${result_}\nTerminal command ran for ${MAX_TERMINAL_TOTAL_TIME}s and did not finish successfully in the temporary terminal. For longer-running commands, open a persistent terminal and run the command there.`
 				}
 				throw new Error(`Unexpected internal error: Terminal command did not resolve with a valid reason.`)
 			},
@@ -566,7 +568,7 @@ export class ToolsService implements IToolsService {
 					return `${result_}\n(exit code ${resolveReason.exitCode})`
 				}
 				// bg command
-				if (resolveReason.type === 'timeout') {
+				if (resolveReason.type === 'total_timeout') {
 					return `${result_}\nTerminal command is running in terminal ${persistentTerminalId}. The given outputs are the results after ${MAX_TERMINAL_BG_COMMAND_TIME} seconds.`
 				}
 				throw new Error(`Unexpected internal error: Terminal command did not resolve with a valid reason.`)

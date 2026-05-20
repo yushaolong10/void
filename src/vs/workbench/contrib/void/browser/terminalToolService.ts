@@ -12,7 +12,7 @@ import { createDecorator } from '../../../../platform/instantiation/common/insta
 import { TerminalLocation } from '../../../../platform/terminal/common/terminal.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { ITerminalService, ITerminalInstance, ICreateTerminalOptions } from '../../../../workbench/contrib/terminal/browser/terminal.js';
-import { MAX_TERMINAL_BG_COMMAND_TIME, MAX_TERMINAL_CHARS, MAX_TERMINAL_INACTIVE_TIME } from '../common/prompt/prompts.js';
+import { MAX_TERMINAL_BG_COMMAND_TIME, MAX_TERMINAL_CHARS, MAX_TERMINAL_INACTIVE_TIME, MAX_TERMINAL_TOTAL_TIME } from '../common/prompt/prompts.js';
 import { TerminalResolveReason } from '../common/toolsServiceTypes.js';
 import { timeout } from '../../../../base/common/async.js';
 
@@ -321,25 +321,34 @@ export class TerminalToolService extends Disposable implements ITerminalToolServ
 				// timeout after X seconds
 				new Promise<void>((res) => {
 					setTimeout(() => {
-						resolveReason = { type: 'timeout' };
+						resolveReason = { type: 'total_timeout' };
 						res()
 					}, MAX_TERMINAL_BG_COMMAND_TIME * 1000)
 				})
 				// inactivity-based timeout
 				: new Promise<void>(res => {
-					let globalTimeoutId: ReturnType<typeof setTimeout>;
+					let idleTimeoutId: ReturnType<typeof setTimeout>;
+					let totalTimeoutId: ReturnType<typeof setTimeout>;
+					const resolveIfNeeded = (reason: TerminalResolveReason) => {
+						if (resolveReason) return
+						resolveReason = reason;
+						res();
+					}
 					const resetTimer = () => {
-						clearTimeout(globalTimeoutId);
-						globalTimeoutId = setTimeout(() => {
-							if (resolveReason) return
-
-							resolveReason = { type: 'timeout' };
-							res();
+						clearTimeout(idleTimeoutId);
+						idleTimeoutId = setTimeout(() => {
+							resolveIfNeeded({ type: 'idle_timeout' });
 						}, MAX_TERMINAL_INACTIVE_TIME * 1000);
 					};
+					totalTimeoutId = setTimeout(() => {
+						resolveIfNeeded({ type: 'total_timeout' });
+					}, MAX_TERMINAL_TOTAL_TIME * 1000);
 
 					const dTimeout = terminal.onData(() => { resetTimer(); });
-					disposables.push(dTimeout, toDisposable(() => clearTimeout(globalTimeoutId)));
+					disposables.push(dTimeout, toDisposable(() => {
+						clearTimeout(idleTimeoutId);
+						clearTimeout(totalTimeoutId);
+					}));
 					resetTimer();
 				})
 
@@ -350,7 +359,7 @@ export class TerminalToolService extends Disposable implements ITerminalToolServ
 
 
 			// read result if timed out, since we didn't get it (could clean this code up but it's ok)
-			if (resolveReason?.type === 'timeout') {
+			if (resolveReason?.type === 'idle_timeout' || resolveReason?.type === 'total_timeout') {
 				const terminalId = isPersistent ? params.persistentTerminalId : params.terminalId
 				result = await this.readTerminal(terminalId)
 			}
