@@ -684,26 +684,33 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 
 
 		let interrupted = false
+		let interruptTool: (() => void) | undefined
 		let resolveInterruptor: (r: () => void) => void = () => { }
 		const interruptorPromise = new Promise<() => void>(res => { resolveInterruptor = res })
 		try {
 
 			// set stream state
 			this._setStreamState(threadId, { isRunning: 'tool', interrupt: interruptorPromise, toolInfo: { toolName, toolParams, id: toolId, content: 'interrupted...', rawParams: opts.unvalidatedToolParams, mcpServerName } })
+			resolveInterruptor(() => {
+				interrupted = true
+				interruptTool?.()
+			})
 
 			if (isBuiltInTool) {
-				const { result, interruptTool } = await this._toolsService.callTool[toolName](toolParams as any)
-				const interruptor = () => { interrupted = true; interruptTool?.() }
-				resolveInterruptor(interruptor)
+				const toolCall = await this._toolsService.callTool[toolName](toolParams as any)
+				interruptTool = toolCall.interruptTool
 
-				toolResult = await result
+				if (interrupted) {
+					interruptTool?.()
+					return { interrupted: true }
+				}
+
+				toolResult = await toolCall.result
 			}
 			else {
 				const mcpTools = this._mcpService.getMCPTools()
 				const mcpTool = mcpTools?.find(t => t.name === toolName)
 				if (!mcpTool) { throw new Error(`MCP tool ${toolName} not found`) }
-
-				resolveInterruptor(() => { })
 
 				toolResult = (await this._mcpService.callMCPTool({
 					serverName: mcpTool.mcpServerName ?? 'unknown_mcp_server',
@@ -782,7 +789,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 			if (interrupted) {
 				this._setStreamState(threadId, undefined)
 				this._addUserCheckpoint({ threadId })
-
+				return
 			}
 		}
 		this._setStreamState(threadId, { isRunning: 'idle', interrupt: 'not_needed' })  // just decorative, for clarity

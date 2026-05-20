@@ -701,13 +701,14 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 
 		const persistentTerminalIDs = this.terminalToolService.listPersistentTerminalIds()
 
-		// Build a cache key that covers all dynamic inputs
-		// directoryStr is already cached internally, so we just use a summary for key comparison
+		// Build a cache key that covers all dynamic inputs.
+		// Include the full directory string so system-message cache invalidation
+		// exactly tracks the directory snapshot produced by _getDirectoryStrCached.
 		const cacheKey = JSON.stringify({
 			workspaceFolders,
 			openedURIs,
 			activeURI,
-			directoryStrSummary: { length: directoryStr.length, first100: directoryStr.slice(0, 100) },
+			directoryStr,
 			persistentTerminalIDs,
 			mcpToolsSummary: mcpTools?.map(t => ({ name: t.name, server: t.mcpServerName, paramsKeys: Object.keys(t.params).sort() })),
 			chatMode,

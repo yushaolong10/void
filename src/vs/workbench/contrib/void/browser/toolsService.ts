@@ -1,4 +1,4 @@
-import { CancellationToken } from '../../../../base/common/cancellation.js'
+import { CancellationTokenSource } from '../../../../base/common/cancellation.js'
 import { URI } from '../../../../base/common/uri.js'
 import { IFileService } from '../../../../platform/files/common/files.js'
 import { registerSingleton, InstantiationType } from '../../../../platform/instantiation/common/extensions.js'
@@ -348,16 +348,19 @@ export class ToolsService implements IToolsService {
 					includePattern: includePattern ?? undefined,
 					sortByScore: true, // makes results 10x better
 				})
-				const data = await searchService.fileSearch(query, CancellationToken.None)
+				const cts = new CancellationTokenSource()
+				const result = searchService.fileSearch(query, cts.token).then(data => {
+					const fromIdx = MAX_CHILDREN_URIs_PAGE * (pageNumber - 1)
+					const toIdx = MAX_CHILDREN_URIs_PAGE * pageNumber - 1
+					const uris = data.results
+						.slice(fromIdx, toIdx + 1) // paginate
+						.map(({ resource, results }) => resource)
 
-				const fromIdx = MAX_CHILDREN_URIs_PAGE * (pageNumber - 1)
-				const toIdx = MAX_CHILDREN_URIs_PAGE * pageNumber - 1
-				const uris = data.results
-					.slice(fromIdx, toIdx + 1) // paginate
-					.map(({ resource, results }) => resource)
+					const hasNextPage = (data.results.length - 1) - toIdx >= 1
+					return { uris, hasNextPage }
+				})
 
-				const hasNextPage = (data.results.length - 1) - toIdx >= 1
-				return { result: { uris, hasNextPage } }
+				return { result, interruptTool: () => cts.cancel() }
 			},
 
 			search_for_files: async ({ query: queryStr, isRegex, searchInFolder, pageNumber }) => {
@@ -370,16 +373,19 @@ export class ToolsService implements IToolsService {
 					isRegExp: isRegex,
 				}, searchFolders)
 
-				const data = await searchService.textSearch(query, CancellationToken.None)
+				const cts = new CancellationTokenSource()
+				const result = searchService.textSearch(query, cts.token).then(data => {
+					const fromIdx = MAX_CHILDREN_URIs_PAGE * (pageNumber - 1)
+					const toIdx = MAX_CHILDREN_URIs_PAGE * pageNumber - 1
+					const uris = data.results
+						.slice(fromIdx, toIdx + 1) // paginate
+						.map(({ resource, results }) => resource)
 
-				const fromIdx = MAX_CHILDREN_URIs_PAGE * (pageNumber - 1)
-				const toIdx = MAX_CHILDREN_URIs_PAGE * pageNumber - 1
-				const uris = data.results
-					.slice(fromIdx, toIdx + 1) // paginate
-					.map(({ resource, results }) => resource)
+					const hasNextPage = (data.results.length - 1) - toIdx >= 1
+					return { queryStr, uris, hasNextPage }
+				})
 
-				const hasNextPage = (data.results.length - 1) - toIdx >= 1
-				return { result: { queryStr, uris, hasNextPage } }
+				return { result, interruptTool: () => cts.cancel() }
 			},
 			search_in_file: async ({ uri, query, isRegex }) => {
 				await voidModelService.initializeModel(uri);
