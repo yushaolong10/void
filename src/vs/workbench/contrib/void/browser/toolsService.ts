@@ -259,14 +259,16 @@ export class ToolsService implements IToolsService {
 			},
 
 			rewrite_file: (params: RawToolParamsObj) => {
-				const { uri: uriStr, new_content: newContentUnknown } = params
+				const { uri: uriStr, new_content: newContentSnakeCase, newContent: newContentCamelCase } = params
+				const newContentUnknown = newContentSnakeCase ?? newContentCamelCase
 				const uri = validateURI(uriStr)
 				const newContent = validateStr('newContent', newContentUnknown)
 				return { uri, newContent }
 			},
 
 			edit_file: (params: RawToolParamsObj) => {
-				const { uri: uriStr, search_replace_blocks: searchReplaceBlocksUnknown } = params
+				const { uri: uriStr, search_replace_blocks: searchReplaceBlocksSnakeCase, searchReplaceBlocks: searchReplaceBlocksCamelCase } = params
+				const searchReplaceBlocksUnknown = searchReplaceBlocksSnakeCase ?? searchReplaceBlocksCamelCase
 				const uri = validateURI(uriStr)
 				const searchReplaceBlocks = validateStr('searchReplaceBlocks', searchReplaceBlocksUnknown)
 				if (extractSearchReplaceBlocks(searchReplaceBlocks).length === 0) {
