@@ -117,9 +117,17 @@ export class LLMMessageChannel implements IServerChannel {
 	private async _callAbort(params: MainLLMMessageAbortParams) {
 		const { requestId } = params;
 		if (!(requestId in this._infoOfRunningRequest)) return
-		const { waitForSend, abortRef } = this._infoOfRunningRequest[requestId]
-		await waitForSend // wait for the send to finish so we know abortRef was set
-		abortRef?.current?.()
+		const { abortRef } = this._infoOfRunningRequest[requestId]
+		if (abortRef.current) {
+			abortRef.current()
+		} else {
+			// abortRef is assigned synchronously near the start of sendLLMMessage();
+			// if abort races with request startup, retry on the next microtask instead
+			// of waiting for the whole request to finish.
+			queueMicrotask(() => {
+				abortRef.current?.()
+			})
+		}
 		delete this._infoOfRunningRequest[requestId]
 	}
 

@@ -304,14 +304,23 @@ npm run gulp vscode-darwin-arm64
 - 未签名
 - 未公证
 
-如果需要对外分发，需要额外配置：
+如果需要对外分发，需要额外配置，这不属于当前文档范围。
 
 - Apple Developer 证书
 - codesign
 - notarization
 
-这不属于当前文档范围。
+本项目发布的dmg若内部使用，可以使用以下命令:
 
+1.下载并打开dmg，展示应用窗口
+
+2.将void应用，拖到访达中的应用程序，即会在目录 `/Applications` 出现应用app
+
+3.执行命令
+
+```
+sudo xattr -dr com.apple.quarantine "/Applications/Void.app"
+```
 
 ## 14. 最短执行版
 
