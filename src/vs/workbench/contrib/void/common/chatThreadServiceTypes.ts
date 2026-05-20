@@ -57,10 +57,18 @@ export type ChatMessage =
 			stagingSelections: StagingSelectionItem[];
 			isBeingEdited: boolean;
 		}
-	} | {
+	}
+	| {
 		role: 'assistant';
 		displayContent: string; // content received from LLM  - allowed to be '', will be replaced with (empty)
 		reasoning: string; // reasoning from the LLM, used for step-by-step thinking
+
+		anthropicReasoning: AnthropicReasoning[] | null; // anthropic reasoning
+	}
+	| {
+		role: 'aborted_assistant';
+		displayContent: string; // content received from LLM before being aborted - allowed to be '', will be replaced with (empty)
+		reasoning: string; // reasoning from the LLM before being aborted
 
 		anthropicReasoning: AnthropicReasoning[] | null; // anthropic reasoning
 	}

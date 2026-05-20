@@ -2531,6 +2531,11 @@ const _ChatBubble = ({ threadId, chatMessage, currCheckpointIdx, isCommitted, me
 			isCommitted={isCommitted}
 		/>
 	}
+	else if (role === 'aborted_assistant') {
+		return <div className={`${isCheckpointGhost ? 'opacity-50' : ''} select-none text-[var(--vscode-descriptionForeground)] text-xs italic px-3 py-1`}>
+			(回答被中断)
+		</div>
+	}
 	else if (role === 'tool') {
 
 		if (chatMessage.type === 'invalid_params') {

@@ -429,12 +429,13 @@ export class ToolsService implements IToolsService {
 				}
 				await editCodeService.callBeforeApplyOrEdit(uri)
 				editCodeService.instantlyRewriteFile({ uri, newContent })
-				// at end, get lint errors
-				const lintErrorsPromise = Promise.resolve().then(async () => {
-					await timeout(2000)
+				// at end, get lint errors (only if user wants them, otherwise skip the 1s delay)
+				const includeLintErrors = this.voidSettingsService.state.globalSettings.includeToolLintErrors
+				const lintErrorsPromise = includeLintErrors ? Promise.resolve().then(async () => {
+					await timeout(1000)
 					const { lintErrors } = this._getLintErrors(uri)
 					return { lintErrors }
-				})
+				}) : Promise.resolve({ lintErrors: null })
 				return { result: lintErrorsPromise }
 			},
 
@@ -446,12 +447,13 @@ export class ToolsService implements IToolsService {
 				await editCodeService.callBeforeApplyOrEdit(uri)
 				editCodeService.instantlyApplySearchReplaceBlocks({ uri, searchReplaceBlocks })
 
-				// at end, get lint errors
-				const lintErrorsPromise = Promise.resolve().then(async () => {
-					await timeout(2000)
+				// at end, get lint errors (only if user wants them, otherwise skip the 1s delay)
+				const includeLintErrors = this.voidSettingsService.state.globalSettings.includeToolLintErrors
+				const lintErrorsPromise = includeLintErrors ? Promise.resolve().then(async () => {
+					await timeout(1000)
 					const { lintErrors } = this._getLintErrors(uri)
 					return { lintErrors }
-				})
+				}) : Promise.resolve({ lintErrors: null })
 
 				return { result: lintErrorsPromise }
 			},

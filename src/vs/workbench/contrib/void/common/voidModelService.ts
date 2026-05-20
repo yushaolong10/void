@@ -1,9 +1,11 @@
 import { Disposable, IReference } from '../../../../base/common/lifecycle.js';
 import { URI } from '../../../../base/common/uri.js';
 import { ITextModel } from '../../../../editor/common/model.js';
+import { IModelService } from '../../../../editor/common/services/model.js';
 import { IResolvedTextEditorModel, ITextModelService } from '../../../../editor/common/services/resolverService.js';
 import { registerSingleton, InstantiationType } from '../../../../platform/instantiation/common/extensions.js';
 import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
+import { ILogService } from '../../../../platform/log/common/log.js';
 import { ITextFileService } from '../../../services/textfile/common/textfiles.js';
 
 type VoidModelType = {
@@ -31,8 +33,18 @@ class VoidModelService extends Disposable implements IVoidModelService {
 	constructor(
 		@ITextModelService private readonly _textModelService: ITextModelService,
 		@ITextFileService private readonly _textFileService: ITextFileService,
+		@IModelService private readonly _modelService: IModelService,
+		@ILogService private readonly _logService: ILogService,
 	) {
 		super();
+		// Clean up model references when models are removed to prevent memory leaks
+		this._register(this._modelService.onModelRemoved(model => {
+			const fsPath = model.uri.fsPath
+			if (fsPath in this._modelRefOfURI) {
+				this._modelRefOfURI[fsPath].dispose()
+				delete this._modelRefOfURI[fsPath]
+			}
+		}));
 	}
 
 	saveModel = async (uri: URI) => {
@@ -49,7 +61,7 @@ class VoidModelService extends Disposable implements IVoidModelService {
 			this._modelRefOfURI[uri.fsPath] = editorModelRef;
 		}
 		catch (e) {
-			console.log('InitializeModel error:', e)
+			this._logService.warn('InitializeModel error:', e)
 		}
 	};
 

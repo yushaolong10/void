@@ -1,5 +1,4 @@
 import { Disposable } from '../../../../base/common/lifecycle.js';
-import { deepClone } from '../../../../base/common/objects.js';
 import { IModelService } from '../../../../editor/common/services/model.js';
 import { registerSingleton, InstantiationType } from '../../../../platform/instantiation/common/extensions.js';
 import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
@@ -43,8 +42,8 @@ type SimpleLLMMessage = {
 
 const CHARS_PER_TOKEN = 4 // assume abysmal chars per token
 const TRIM_TO_LEN = 120
-const DIRECTORY_STR_CACHE_TTL_MS = 10_000
-const VOID_RULES_CACHE_TTL_MS = 5_000
+const DIRECTORY_STR_CACHE_TTL_MS = 30_000
+const VOID_RULES_CACHE_TTL_MS = 30_000
 
 
 
@@ -268,7 +267,9 @@ const prepareOpenAIOrAnthropicMessages = ({
 		contextWindow * 1 / 2, // reserve at least 1/4 of the token window length
 		reservedOutputTokenSpace ?? 4_096 // defaults to 4096
 	)
-	let messages: (SimpleLLMMessage | { role: 'system', content: string })[] = deepClone(messages_)
+	// Shallow-clone each message to avoid mutating the caller's objects.
+	// We only mutate `.content` (string primitives), so a shallow copy is sufficient.
+	let messages: (SimpleLLMMessage | { role: 'system', content: string })[] = messages_.map(m => ({ ...m }))
 
 	// ================ system message ================
 	// A COMPLETE HACK: last message is system message for context purposes
@@ -287,13 +288,15 @@ const prepareOpenAIOrAnthropicMessages = ({
 
 	// ================ fit into context ================
 
-	// the higher the weight, the higher the desire to truncate - TRIM HIGHEST WEIGHT MESSAGES
-	const alreadyTrimmedIdxes = new Set<number>()
-	const weight = (message: MesType, messages: MesType[], idx: number) => {
+	// Pre-compute weights once (O(n)), sort (O(n log n)), then trim in order.
+	// We use message count from outside the closure for O(1) access.
+	const msgCount = messages.length
+
+	const weight = (message: MesType, idx: number) => {
 		const base = message.content.length
 
 		let multiplier: number
-		multiplier = 1 + (messages.length - 1 - idx) / messages.length // slow rampdown from 2 to 1 as index increases
+		multiplier = 1 + (msgCount - 1 - idx) / msgCount // slow rampdown from 2 to 1 as index increases
 		if (message.role === 'user') {
 			multiplier *= 1
 		}
@@ -303,67 +306,49 @@ const prepareOpenAIOrAnthropicMessages = ({
 		else {
 			multiplier *= 10 // llm tokens are far less valuable than user tokens
 		}
-
-		// any already modified message should not be trimmed again
-		if (alreadyTrimmedIdxes.has(idx)) {
-			multiplier = 0
-		}
 		// 1st and last messages should be very low weight
-		if (idx <= 1 || idx >= messages.length - 1 - 3) {
+		if (idx <= 1 || idx >= msgCount - 1 - 3) {
 			multiplier *= .05
 		}
 		return base * multiplier
 	}
 
-	const _findLargestByWeight = (messages_: MesType[]) => {
-		let largestIndex = -1
-		let largestWeight = -Infinity
-		for (let i = 0; i < messages.length; i += 1) {
-			const m = messages[i]
-			const w = weight(m, messages_, i)
-			if (w > largestWeight) {
-				largestWeight = w
-				largestIndex = i
-			}
-		}
-		return largestIndex
-	}
-
 	let totalLen = 0
 	for (const m of messages) { totalLen += m.content.length }
 	const charsNeedToTrim = totalLen - Math.max(
-		(contextWindow - reservedOutputTokenSpace) * CHARS_PER_TOKEN, // can be 0, in which case charsNeedToTrim=everything, bad
-		5_000 // ensure we don't trim at least 5k chars (just a random small value)
+		(contextWindow - reservedOutputTokenSpace) * CHARS_PER_TOKEN,
+		5_000
 	)
 
-
-	// <----------------------------------------->
-	// 0                      |    |             |
-	//                        |    contextWindow |
-	//                     contextWindow - maxOut|putTokens
-	//                                          totalLen
-	let remainingCharsToTrim = charsNeedToTrim
-	let i = 0
-
-	while (remainingCharsToTrim > 0) {
-		i += 1
-		if (i > 100) break
-
-		const trimIdx = _findLargestByWeight(messages)
-		const m = messages[trimIdx]
-
-		// if can finish here, do
-		const numCharsWillTrim = m.content.length - TRIM_TO_LEN
-		if (numCharsWillTrim > remainingCharsToTrim) {
-			// trim remainingCharsToTrim + '...'.length chars
-			m.content = m.content.slice(0, m.content.length - remainingCharsToTrim - '...'.length).trim() + '...'
-			break
+	if (charsNeedToTrim > 0) {
+		// Build a sorted list of indices by weight descending
+		const indicesWithWeight: { idx: number; weight: number }[] = []
+		for (let i = 0; i < messages.length; i += 1) {
+			indicesWithWeight.push({ idx: i, weight: weight(messages[i], i) })
 		}
+		indicesWithWeight.sort((a, b) => b.weight - a.weight) // highest weight first
 
-		remainingCharsToTrim -= numCharsWillTrim
-		m.content = m.content.substring(0, TRIM_TO_LEN - '...'.length) + '...'
-		alreadyTrimmedIdxes.add(trimIdx)
+		let remainingCharsToTrim = charsNeedToTrim
+
+		for (const { idx } of indicesWithWeight) {
+			if (remainingCharsToTrim <= 0) break
+
+			const m = messages[idx]
+			const trimmedLen = TRIM_TO_LEN - '...'.length
+			const numCharsWillTrim = m.content.length - trimmedLen
+
+			// If trimming this message to TRIM_TO_LEN is more than enough, do a partial trim and finish
+			if (numCharsWillTrim > remainingCharsToTrim) {
+				m.content = m.content.slice(0, m.content.length - remainingCharsToTrim - '...'.length).trim() + '...'
+				break
+			}
+
+			// Trim the entire message to TRIM_TO_LEN
+			remainingCharsToTrim -= numCharsWillTrim
+			m.content = m.content.substring(0, trimmedLen) + '...'
+		}
 	}
+
 
 	// ================ system message hack ================
 	const newSysMsg = messages.shift()!.content
@@ -559,6 +544,13 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 		inFlight: null,
 	}
 
+	// Cache for the full system message used in prepareLLMChatMessages (agent mode)
+	// Key encodes all dynamic inputs; cache is valid as long as nothing changes.
+	private _systemMessageCache: {
+		key: string;
+		value: string;
+	} | null = null;
+
 	constructor(
 		@IModelService private readonly modelService: IModelService,
 		@IWorkspaceContextService private readonly workspaceContextService: IWorkspaceContextService,
@@ -693,7 +685,7 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 	}
 
 
-	// system message
+	// system message with caching: only recompute when inputs change
 	private _generateChatMessagesSystemMessage = async (chatMode: ChatMode, specialToolFormat: 'openai-style' | 'anthropic-style' | 'gemini-style' | undefined) => {
 		const workspaceFolders = this.workspaceContextService.getWorkspace().folders.map(f => f.uri.fsPath)
 
@@ -707,7 +699,26 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 		const mcpTools = this.mcpService.getMCPTools()
 
 		const persistentTerminalIDs = this.terminalToolService.listPersistentTerminalIds()
+
+		// Build a cache key that covers all dynamic inputs
+		// directoryStr is already cached internally, so we just use a summary for key comparison
+		const cacheKey = JSON.stringify({
+			workspaceFolders,
+			openedURIs,
+			activeURI,
+			directoryStrSummary: { length: directoryStr.length, first100: directoryStr.slice(0, 100) },
+			persistentTerminalIDs,
+			mcpToolsSummary: mcpTools?.map(t => ({ name: t.name, server: t.mcpServerName, paramsKeys: Object.keys(t.params).sort() })),
+			chatMode,
+			includeXMLToolDefinitions,
+		})
+
+		if (this._systemMessageCache?.key === cacheKey) {
+			return this._systemMessageCache.value
+		}
+
 		const systemMessage = chat_systemMessage({ workspaceFolders, openedURIs, directoryStr, activeURI, persistentTerminalIDs, chatMode, mcpTools, includeXMLToolDefinitions })
+		this._systemMessageCache = { key: cacheKey, value: systemMessage }
 		return systemMessage
 	}
 
@@ -722,6 +733,15 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 		for (const m of chatMessages) {
 			if (m.role === 'checkpoint') continue
 			if (m.role === 'interrupted_streaming_tool') continue
+			if (m.role === 'aborted_assistant') {
+				// mark aborted content so the LLM knows not to continue it
+				simpleLLMMessages.push({
+					role: 'assistant',
+					content: '[The previous response was interrupted by the user. Ignore the above and continue with the latest question.]',
+					anthropicReasoning: null,
+				})
+				continue
+			}
 			if (m.role === 'assistant') {
 				simpleLLMMessages.push({
 					role: m.role,

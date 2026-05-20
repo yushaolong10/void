@@ -32,7 +32,7 @@ import { INotificationService, Severity } from '../../../../platform/notificatio
 import { truncate } from '../../../../base/common/strings.js';
 import { THREAD_STORAGE_KEY } from '../common/storageKeys.js';
 import { IConvertToLLMMessageService } from './convertToLLMMessageService.js';
-import { timeout } from '../../../../base/common/async.js';
+import { RunOnceScheduler, timeout } from '../../../../base/common/async.js';
 import { deepClone } from '../../../../base/common/objects.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { IDirectoryStrService } from '../common/directoryStrService.js';
@@ -412,7 +412,15 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 		return threads
 	}
 
-	private _storeAllThreads(threads: ChatThreads) {
+	private readonly _flushStoreScheduler = this._register(new RunOnceScheduler(() => {
+		if (!this._latestThreads) return;
+		this._writeThreadsSync(this._latestThreads);
+		this._latestThreads = null;
+	}, 500));
+
+	private _latestThreads: ChatThreads | null = null;
+
+	private _writeThreadsSync(threads: ChatThreads) {
 		const serializedThreads = JSON.stringify(threads);
 		this._storageService.store(
 			THREAD_STORAGE_KEY,
@@ -420,6 +428,15 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 			StorageScope.APPLICATION,
 			StorageTarget.USER
 		);
+	}
+
+	private _storeAllThreads(threads: ChatThreads) {
+		this._latestThreads = threads;
+		this._flushStoreScheduler.schedule();
+	}
+
+	private _storeAllThreadsImmediate(threads: ChatThreads) {
+		this._writeThreadsSync(threads);
 	}
 
 
@@ -561,7 +578,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 		// add assistant message
 		if (this.streamState[threadId]?.isRunning === 'LLM') {
 			const { displayContentSoFar, reasoningSoFar, toolCallSoFar } = this.streamState[threadId].llmInfo
-			this._addMessageToThread(threadId, { role: 'assistant', displayContent: displayContentSoFar, reasoning: reasoningSoFar, anthropicReasoning: null })
+			this._addMessageToThread(threadId, { role: 'aborted_assistant', displayContent: displayContentSoFar, reasoning: reasoningSoFar, anthropicReasoning: null })
 			if (toolCallSoFar) this._addMessageToThread(threadId, { role: 'interrupted_streaming_tool', name: toolCallSoFar.name, mcpServerName: this._computeMCPServerOfToolName(toolCallSoFar.name) })
 		}
 		// add tool that's running
@@ -939,7 +956,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 				],
 			}
 		}
-		this._storeAllThreads(newThreads)
+		this._storeAllThreadsImmediate(newThreads)
 		this._setState({ allThreads: newThreads }) // the current thread just changed (it had a message added to it)
 	}
 
@@ -1643,7 +1660,7 @@ We only need to do it for files that were edited since `from`, ie files between 
 			...currentThreads,
 			[newThread.id]: newThread
 		}
-		this._storeAllThreads(newThreads)
+		this._storeAllThreadsImmediate(newThreads)
 		this._setState({ allThreads: newThreads, currentThreadId: newThread.id })
 	}
 
@@ -1656,7 +1673,7 @@ We only need to do it for files that were edited since `from`, ie files between 
 		delete newThreads[threadId];
 
 		// store the updated threads
-		this._storeAllThreads(newThreads);
+		this._storeAllThreadsImmediate(newThreads);
 		this._setState({ ...this.state, allThreads: newThreads })
 	}
 
@@ -1672,7 +1689,7 @@ We only need to do it for files that were edited since `from`, ie files between 
 			...currentThreads,
 			[newThread.id]: newThread,
 		}
-		this._storeAllThreads(newThreads)
+		this._storeAllThreadsImmediate(newThreads)
 		this._setState({ allThreads: newThreads })
 	}
 
