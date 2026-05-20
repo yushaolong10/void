@@ -165,6 +165,39 @@ const findIndexOfAny = (fullText: string, matches: string[]) => {
 
 
 type ToolOfToolName = { [toolName: string]: InternalToolInfo | undefined }
+
+const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+const stripTrailingXMLClosers = (s: string, toolName: ToolName) => {
+	return s
+		.replace(new RegExp(`\\s*</${escapeRegex(toolName)}\\s*>\\s*$`, 'i'), '')
+		.replace(/\s*<\/tool_call\s*>\s*$/i, '')
+		.trimEnd()
+}
+
+const unwrapGenericToolCallTag = (
+	str: string,
+	toolOfToolName: ToolOfToolName,
+): { toolName: ToolName, normalizedText: string, wrapperStartIdx: number } | null => {
+	const toolNames = Object.keys(toolOfToolName)
+	for (const toolName_ of toolNames) {
+		const toolName = toolName_ as ToolName
+		const pattern = new RegExp(`<tool_call\\s+name=["']${escapeRegex(toolName)}["']\\s*>`, 'i')
+		const match = pattern.exec(str)
+		if (!match || match.index === undefined) continue
+
+		const wrapperOpenTag = match[0]
+		const wrapperStartIdx = match.index
+		const afterOpenIdx = wrapperStartIdx + wrapperOpenTag.length
+		const closeTag = `</tool_call>`
+		const closeIdx = str.indexOf(closeTag, afterOpenIdx)
+		const innerText = closeIdx === -1 ? str.substring(afterOpenIdx) : str.substring(afterOpenIdx, closeIdx)
+		const normalizedText = `<${toolName}>${innerText}${closeIdx === -1 ? '' : `</${toolName}>`}`
+		return { toolName, normalizedText, wrapperStartIdx }
+	}
+	return null
+}
+
 const parseXMLPrefixToToolCall = <T extends ToolName,>(toolName: T, toolId: string, str: string, toolOfToolName: ToolOfToolName): RawToolCallObj => {
 	const paramsObj: RawToolParamsObj = {}
 	const doneParams: ToolParamName<T>[] = []
@@ -176,7 +209,7 @@ const parseXMLPrefixToToolCall = <T extends ToolName,>(toolName: T, toolId: stri
 			const paramName = p as ToolParamName<T>
 			const orig = paramsObj[paramName]
 			if (orig === undefined) continue
-			paramsObj[paramName] = trimBeforeAndAfterNewLines(orig)
+			paramsObj[paramName] = stripTrailingXMLClosers(trimBeforeAndAfterNewLines(orig), toolName)
 		}
 
 		// return tool call
@@ -319,6 +352,19 @@ const extractToolCallFromSourceText = (
 	toolId: string,
 	toolOfToolName: ToolOfToolName,
 ): { displayText: string, toolCall: RawToolCallObj } | null => {
+	const wrappedMatch = unwrapGenericToolCallTag(sourceText, toolOfToolName)
+	if (wrappedMatch) {
+		return {
+			displayText: sourceText.substring(0, wrappedMatch.wrapperStartIdx).trimEnd(),
+			toolCall: parseXMLPrefixToToolCall(
+				wrappedMatch.toolName,
+				toolId,
+				wrappedMatch.normalizedText,
+				toolOfToolName,
+			)
+		}
+	}
+
 	const toolOpenTags = Object.keys(toolOfToolName).map(toolName => `<${toolName}>`)
 
 	const exactMatch = findIndexOfAny(sourceText, toolOpenTags)

@@ -5,6 +5,7 @@ import { registerSingleton, InstantiationType } from '../../../../platform/insta
 import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
+import { IFileService } from '../../../../platform/files/common/files.js';
 import { ChatMessage } from '../common/chatThreadServiceTypes.js';
 import { getIsReasoningEnabledState, getReservedOutputTokenSpace, getModelCapabilities } from '../common/modelCapabilities.js';
 import { reParsedToolXMLString, chat_systemMessage } from '../common/prompt/prompts.js';
@@ -42,6 +43,8 @@ type SimpleLLMMessage = {
 
 const CHARS_PER_TOKEN = 4 // assume abysmal chars per token
 const TRIM_TO_LEN = 120
+const DIRECTORY_STR_CACHE_TTL_MS = 10_000
+const VOID_RULES_CACHE_TTL_MS = 5_000
 
 
 
@@ -532,10 +535,35 @@ export const IConvertToLLMMessageService = createDecorator<IConvertToLLMMessageS
 class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMessageService {
 	_serviceBrand: undefined;
 
+	private _directoryStrCache: {
+		key: string;
+		value: string;
+		expiresAt: number;
+		inFlight: Promise<string> | null;
+	} = {
+		key: '',
+		value: '',
+		expiresAt: 0,
+		inFlight: null,
+	}
+
+	private _voidRulesCache: {
+		key: string;
+		value: string;
+		expiresAt: number;
+		inFlight: Promise<string> | null;
+	} = {
+		key: '',
+		value: '',
+		expiresAt: 0,
+		inFlight: null,
+	}
+
 	constructor(
 		@IModelService private readonly modelService: IModelService,
 		@IWorkspaceContextService private readonly workspaceContextService: IWorkspaceContextService,
 		@IEditorService private readonly editorService: IEditorService,
+		@IFileService private readonly fileService: IFileService,
 		@IDirectoryStrService private readonly directoryStrService: IDirectoryStrService,
 		@ITerminalToolService private readonly terminalToolService: ITerminalToolService,
 		@IVoidSettingsService private readonly voidSettingsService: IVoidSettingsService,
@@ -563,6 +591,54 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 		}
 	}
 
+	private async _getVoidRulesFileContentsAsync(): Promise<string> {
+		const workspaceFolders = this.workspaceContextService.getWorkspace().folders;
+		const cacheKey = workspaceFolders.map(folder => folder.uri.toString()).join('\n');
+		const now = Date.now();
+
+		if (
+			this._voidRulesCache.key === cacheKey &&
+			this._voidRulesCache.expiresAt > now
+		) {
+			return this._voidRulesCache.value;
+		}
+		if (this._voidRulesCache.key === cacheKey && this._voidRulesCache.inFlight) {
+			return this._voidRulesCache.inFlight;
+		}
+
+		const computePromise = (async () => {
+		try {
+			const contents = await Promise.all(workspaceFolders.map(async folder => {
+				try {
+					const uri = URI.joinPath(folder.uri, '.voidrules');
+					const fileContent = await this.fileService.readFile(uri);
+					return fileContent.value.toString();
+				}
+				catch {
+					return '';
+				}
+			}));
+
+			return contents
+				.filter(Boolean)
+				.join('\n\n')
+				.trim();
+		}
+		catch (e) {
+			return '';
+		}
+		})();
+
+		this._voidRulesCache.key = cacheKey;
+		this._voidRulesCache.inFlight = computePromise;
+
+		const value = await computePromise;
+		this._voidRulesCache.value = value;
+		this._voidRulesCache.expiresAt = Date.now() + VOID_RULES_CACHE_TTL_MS;
+		this._voidRulesCache.inFlight = null;
+		return value;
+	}
+
 	// Get combined AI instructions from settings and .voidrules files
 	private _getCombinedAIInstructions(): string {
 		const globalAIInstructions = this.voidSettingsService.state.globalSettings.aiInstructions;
@@ -574,6 +650,48 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 		return ans.join('\n\n')
 	}
 
+	private async _getCombinedAIInstructionsAsync(): Promise<string> {
+		const globalAIInstructions = this.voidSettingsService.state.globalSettings.aiInstructions;
+		const voidRulesFileContent = await this._getVoidRulesFileContentsAsync();
+
+		const ans: string[] = [];
+		if (globalAIInstructions) ans.push(globalAIInstructions);
+		if (voidRulesFileContent) ans.push(voidRulesFileContent);
+		return ans.join('\n\n');
+	}
+
+	private async _getDirectoryStrCached(chatMode: ChatMode): Promise<string> {
+		const workspaceFolders = this.workspaceContextService.getWorkspace().folders;
+		const cutOffMessage = chatMode === 'agent' || chatMode === 'gather' ?
+			`...Directories string cut off, use tools to read more...`
+			: `...Directories string cut off, ask user for more if necessary...`;
+		const cacheKey = JSON.stringify({
+			workspaceFolders: workspaceFolders.map(folder => folder.uri.toString()),
+			cutOffMessage,
+		});
+		const now = Date.now();
+
+		if (
+			this._directoryStrCache.key === cacheKey &&
+			this._directoryStrCache.expiresAt > now
+		) {
+			return this._directoryStrCache.value;
+		}
+		if (this._directoryStrCache.key === cacheKey && this._directoryStrCache.inFlight) {
+			return this._directoryStrCache.inFlight;
+		}
+
+		const computePromise = this.directoryStrService.getAllDirectoriesStr({ cutOffMessage });
+		this._directoryStrCache.key = cacheKey;
+		this._directoryStrCache.inFlight = computePromise;
+
+		const value = await computePromise;
+		this._directoryStrCache.value = value;
+		this._directoryStrCache.expiresAt = Date.now() + DIRECTORY_STR_CACHE_TTL_MS;
+		this._directoryStrCache.inFlight = null;
+		return value;
+	}
+
 
 	// system message
 	private _generateChatMessagesSystemMessage = async (chatMode: ChatMode, specialToolFormat: 'openai-style' | 'anthropic-style' | 'gemini-style' | undefined) => {
@@ -582,11 +700,7 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 		const openedURIs = this.modelService.getModels().filter(m => m.isAttachedToEditor()).map(m => m.uri.fsPath) || [];
 		const activeURI = this.editorService.activeEditor?.resource?.fsPath;
 
-		const directoryStr = await this.directoryStrService.getAllDirectoriesStr({
-			cutOffMessage: chatMode === 'agent' || chatMode === 'gather' ?
-				`...Directories string cut off, use tools to read more...`
-				: `...Directories string cut off, ask user for more if necessary...`
-		})
+		const directoryStr = await this._getDirectoryStrCached(chatMode)
 
 		const includeXMLToolDefinitions = !specialToolFormat
 
@@ -686,7 +800,7 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 		const modelSelectionOptions = this.voidSettingsService.state.optionsOfModelSelection['Chat'][modelSelection.providerName]?.[modelSelection.modelName]
 
 		// Get combined AI instructions
-		const aiInstructions = this._getCombinedAIInstructions();
+		const aiInstructions = await this._getCombinedAIInstructionsAsync();
 		const isReasoningEnabled = getIsReasoningEnabledState('Chat', providerName, modelName, modelSelectionOptions, overridesOfModel)
 		const reservedOutputTokenSpace = getReservedOutputTokenSpace(providerName, modelName, { isReasoningEnabled, overridesOfModel })
 		const llmMessages = this._chatMessagesToSimpleMessages(chatMessages)
@@ -763,6 +877,3 @@ gemini response:
 	}
 }
 */
-
-
-

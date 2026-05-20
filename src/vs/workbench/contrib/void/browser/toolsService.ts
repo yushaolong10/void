@@ -32,10 +32,17 @@ const isFalsy = (u: unknown) => {
 	return !u || u === 'null' || u === 'undefined'
 }
 
+const stripTrailingXMLArtifacts = (value: string) => {
+	return value
+		.replace(/(?:\s*<\/?[a-zA-Z_][\w:-]*(?:\s+[^>]*)?>\s*)+$/g, '')
+		.replace(/(?:\s*<\/?[a-zA-Z_][\w:-]*)+$/g, '')
+		.trimEnd()
+}
+
 const validateStr = (argName: string, value: unknown) => {
 	if (value === null) throw new Error(`Invalid LLM output: ${argName} was null.`)
 	if (typeof value !== 'string') throw new Error(`Invalid LLM output format: ${argName} must be a string, but its type is "${typeof value}". Full value: ${JSON.stringify(value)}.`)
-	return value
+	return stripTrailingXMLArtifacts(value)
 }
 
 
@@ -43,6 +50,7 @@ const validateStr = (argName: string, value: unknown) => {
 const validateURI = (uriStr: unknown) => {
 	if (uriStr === null) throw new Error(`Invalid LLM output: uri was null.`)
 	if (typeof uriStr !== 'string') throw new Error(`Invalid LLM output format: Provided uri must be a string, but it's a(n) ${typeof uriStr}. Full value: ${JSON.stringify(uriStr)}.`)
+	const cleanedUriStr = stripTrailingXMLArtifacts(uriStr)
 
 	// Check if it's already a full URI with scheme (e.g., vscode-remote://, file://, etc.)
 	// Look for :// pattern which indicates a scheme is present
@@ -52,18 +60,18 @@ const validateURI = (uriStr: unknown) => {
 	// - file:///home/user/file.txt (local file with scheme)
 	// - /home/user/file.txt (local file path, will be converted to file://)
 	// - C:\Users\file.txt (Windows local path, will be converted to file://)
-	if (uriStr.includes('://')) {
+	if (cleanedUriStr.includes('://')) {
 		try {
-			const uri = URI.parse(uriStr)
+			const uri = URI.parse(cleanedUriStr)
 			return uri
 		} catch (e) {
 			// If parsing fails, it's a malformed URI
-			throw new Error(`Invalid URI format: ${uriStr}. Error: ${e}`)
+			throw new Error(`Invalid URI format: ${cleanedUriStr}. Error: ${e}`)
 		}
 	} else {
 		// No scheme present, treat as file path
 		// This handles regular file paths like /home/user/file.txt or C:\Users\file.txt
-		const uri = URI.file(uriStr)
+		const uri = URI.file(cleanedUriStr)
 		return uri
 	}
 }
@@ -469,6 +477,7 @@ export class ToolsService implements IToolsService {
 
 
 		const nextPageStr = (hasNextPage: boolean) => hasNextPage ? '\n\n(more on next page...)' : ''
+		const verificationReminder = `\nNext step: verify this change before concluding. Prefer read_lint_errors for a quick check, then inspect the affected file or run a targeted command if needed.`
 
 		const stringifyLintErrors = (lintErrors: LintErrorItem[]) => {
 			return lintErrors
@@ -511,10 +520,10 @@ export class ToolsService implements IToolsService {
 			},
 			// ---
 			create_file_or_folder: (params, result) => {
-				return `URI ${params.uri.fsPath} successfully created.`
+				return `URI ${params.uri.fsPath} successfully created.${verificationReminder}`
 			},
 			delete_file_or_folder: (params, result) => {
-				return `URI ${params.uri.fsPath} successfully deleted.`
+				return `URI ${params.uri.fsPath} successfully deleted.${verificationReminder}`
 			},
 			edit_file: (params, result) => {
 				const lintErrsString = (
@@ -523,7 +532,7 @@ export class ToolsService implements IToolsService {
 							: ` No lint errors found.`)
 						: '')
 
-				return `Change successfully made to ${params.uri.fsPath}.${lintErrsString}`
+				return `Change successfully made to ${params.uri.fsPath}.${lintErrsString}${verificationReminder}`
 			},
 			rewrite_file: (params, result) => {
 				const lintErrsString = (
@@ -532,7 +541,7 @@ export class ToolsService implements IToolsService {
 							: ` No lint errors found.`)
 						: '')
 
-				return `Change successfully made to ${params.uri.fsPath}.${lintErrsString}`
+				return `Change successfully made to ${params.uri.fsPath}.${lintErrsString}${verificationReminder}`
 			},
 			run_command: (params, result) => {
 				const { resolveReason, result: result_, } = result
