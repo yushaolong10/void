@@ -261,6 +261,12 @@ const openSourceModelOptions_assumingOAICompat = {
 		reasoningCapabilities: { supportsReasoning: true, canTurnOffReasoning: false, canIOReasoning: true, openSourceThinkTags: ['<think>', '</think>'] },
 		contextWindow: 32_000, reservedOutputTokenSpace: 4_096,
 	},
+	'deepseekV4Flash': {
+		supportsFIM: false,
+		supportsSystemMessage: 'system-role',
+		reasoningCapabilities: { supportsReasoning: true, canTurnOffReasoning: true, canIOReasoning: true, openSourceThinkTags: ['<think>', '</think>'] },
+		contextWindow: 1_000_000, reservedOutputTokenSpace: 384_000,
+	},
 	'deepseekCoderV3': {
 		supportsFIM: false,
 		supportsSystemMessage: false, // unstable
@@ -424,6 +430,7 @@ const extensiveModelOptionsFallback: VoidStaticProviderInfo['modelOptionsFallbac
 
 	if (lower.includes('deepseek-r1') || lower.includes('deepseek-reasoner')) return toFallback(openSourceModelOptions_assumingOAICompat, 'deepseekR1')
 	if (lower.includes('deepseek') && lower.includes('v2')) return toFallback(openSourceModelOptions_assumingOAICompat, 'deepseekCoderV2')
+	if (lower.includes('deepseek') && /v[4-9]\d*|v[1-9]\d+/.test(lower)) return toFallback(openSourceModelOptions_assumingOAICompat, 'deepseekV4Flash')
 	if (lower.includes('deepseek')) return toFallback(openSourceModelOptions_assumingOAICompat, 'deepseekCoderV3')
 
 	if (lower.includes('llama3')) return toFallback(openSourceModelOptions_assumingOAICompat, 'llama3')
@@ -1580,6 +1587,12 @@ export const getSendableReasoningInfo = (
 	const reasoningEffort = reasoningBudgetSlider?.type === 'effort_slider' ? modelSelectionOptions?.reasoningEffort ?? reasoningBudgetSlider?.default : undefined
 	if (reasoningEffort) {
 		return { type: 'effort_slider_value', isReasoningEnabled: isReasoningEnabled, reasoningEffort: reasoningEffort }
+	}
+
+	// if reasoning is enabled but model has no slider config (e.g. open-source models with think tags),
+	// send a default medium effort so the API actually enables thinking
+	if (reasoningBudgetSlider === undefined) {
+		return { type: 'effort_slider_value', isReasoningEnabled: true, reasoningEffort: 'medium' }
 	}
 
 	return null

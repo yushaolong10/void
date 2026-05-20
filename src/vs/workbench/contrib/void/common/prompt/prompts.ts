@@ -423,13 +423,21 @@ const systemToolsXMLPrompt = (chatMode: ChatMode, mcpTools: InternalToolInfo[] |
     - If you do NOT need a tool, respond normally in plain markdown.
     - If you DO need a tool, you may briefly explain your intent first, but your response must END with exactly one valid XML tool call and nothing after it.
 
-	    Incorrect examples:
-	    - <tool_call name="ls_dir"><uri>/repo</uri></tool_call>
-	    - I will inspect the folder now, then a tool call inside a markdown code block.
-	    - <run_command><command>ls</command><cwd>/repo</cwd></run_command> Thanks
-	    - <run_command><command>ls</command><cwd>/repo</cwd></run_command></run_command>
+    Incorrect examples:
+    - <tool_call name="ls_dir"><uri>/repo</uri></tool_call>
+    - I will inspect the folder now, then a tool call inside a markdown code block.
+    - <run_command><command>ls</command><cwd>/repo</cwd></run_command> Thanks
+    - <run_command><command>ls</command><cwd>/repo</cwd></run_command></run_command>
 
     Correct examples:
+    - <read_file>
+      <uri>/home/user/file.ts</uri>
+      </read_file>
+    - <read_file>
+      <uri>/home/user/file.ts</uri>
+      <start_line>10</start_line>
+      <end_line>20</end_line>
+      </read_file>
     - <ls_dir><uri>/repo</uri></ls_dir>
     - I will inspect the repo root first.
       <get_dir_tree><uri>/repo</uri></get_dir_tree>
