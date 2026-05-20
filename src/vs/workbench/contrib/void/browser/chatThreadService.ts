@@ -767,6 +767,10 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 		// above just defines helpers, below starts the actual function
 		const { chatMode } = this._settingsService.state.globalSettings // should not change as we loop even if user changes it, so it goes here
 		const { overridesOfModel } = this._settingsService.state
+		const promptContext = await this._convertToLLMMessagesService.prepareAgentRunPromptContext({
+			chatMode,
+			modelSelection,
+		})
 
 		let nMessagesSent = 0
 		let shouldSendAnotherMessage = true
@@ -797,7 +801,8 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 			const { messages, separateSystemMessage } = await this._convertToLLMMessagesService.prepareLLMChatMessages({
 				chatMessages,
 				modelSelection,
-				chatMode
+				chatMode,
+				promptContextOverride: promptContext,
 			})
 
 			if (interruptedWhenIdle) {

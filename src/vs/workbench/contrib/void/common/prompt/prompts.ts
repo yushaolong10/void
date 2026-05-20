@@ -456,37 +456,35 @@ const systemToolsXMLPrompt = (chatMode: ChatMode, mcpTools: InternalToolInfo[] |
 
 
 export const chat_systemMessage = ({ workspaceFolders, openedURIs, activeURI, persistentTerminalIDs, directoryStr, chatMode: mode, mcpTools, includeXMLToolDefinitions }: { workspaceFolders: string[], directoryStr: string, openedURIs: string[], activeURI: string | undefined, persistentTerminalIDs: string[], chatMode: ChatMode, mcpTools: InternalToolInfo[] | undefined, includeXMLToolDefinitions: boolean }) => {
-	const header = (`You are an expert coding ${mode === 'agent' ? 'agent' : 'assistant'} whose job is \
-${mode === 'agent' ? `to help the user develop, run, and make changes to their codebase.`
-			: mode === 'gather' ? `to search, understand, and reference files in the user's codebase.`
-				: mode === 'normal' ? `to assist the user with their coding tasks.`
-					: ''}
-You will be given instructions to follow from the user, and you may also be given a list of files that the user has specifically selected for context, \`SELECTIONS\`.
-Please assist the user with their query.`)
+	const stableHeaderBlock = (`You are an expert coding ${mode === 'agent' ? 'agent' : 'assistant'} whose job is \
+	${mode === 'agent' ? `to help the user develop, run, and make changes to their codebase.`
+				: mode === 'gather' ? `to search, understand, and reference files in the user's codebase.`
+					: mode === 'normal' ? `to assist the user with their coding tasks.`
+						: ''}
+	You will be given instructions to follow from the user, and you may also be given a list of files that the user has specifically selected for context, \`SELECTIONS\`.
+	Please assist the user with their query.`)
 
+	const volatileRuntimeBlock = (`Here is the user's current editor/runtime information:
+	<system_info>
+	- ${os}
 
-
-	const sysInfo = (`Here is the user's system information:
-<system_info>
-- ${os}
-
-- The user's workspace contains these folders:
-${workspaceFolders.join('\n') || 'NO FOLDERS OPEN'}
+	- The user's workspace contains these folders:
+	${workspaceFolders.join('\n') || 'NO FOLDERS OPEN'}
 
 - Active file:
 ${activeURI}
 
-- Open files:
-${openedURIs.join('\n') || 'NO OPENED FILES'}${''/* separator */}${mode === 'agent' && persistentTerminalIDs.length !== 0 ? `
+	- Open files:
+	${openedURIs.join('\n') || 'NO OPENED FILES'}${''/* separator */}${mode === 'agent' && persistentTerminalIDs.length !== 0 ? `
 
-- Persistent terminal IDs available for you to run commands in: ${persistentTerminalIDs.join(', ')}` : ''}
-</system_info>`)
+	- Persistent terminal IDs available for you to run commands in: ${persistentTerminalIDs.join(', ')}` : ''}
+	</system_info>`)
 
 
-	const fsInfo = (`Here is an overview of the user's file system:
-<files_overview>
-${directoryStr}
-</files_overview>`)
+	const semiStableWorkspaceBlock = (`Here is an overview of the user's file system:
+	<files_overview>
+	${directoryStr}
+	</files_overview>`)
 
 
 	const toolDefinitions = includeXMLToolDefinitions ? systemToolsXMLPrompt(mode, mcpTools) : null
@@ -541,19 +539,18 @@ Here's an example of a good code block:\n${chatSuggestionDiffExample}`)
 
 	details.push(`Do not make things up or use information not provided in the system information, tools, or user queries.`)
 	details.push(`Always use MARKDOWN to format lists, bullet points, etc. Do NOT write tables.`)
-	details.push(`Today's date is ${new Date().toDateString()}.`)
 
-	const importantDetails = (`Important notes:
+	const stablePolicyBlock = (`Important notes:
 ${details.map((d, i) => `${i + 1}. ${d}`).join('\n\n')}`)
 
 
 	// return answer
 	const ansStrs: string[] = []
-	ansStrs.push(header)
-	ansStrs.push(sysInfo)
+	ansStrs.push(stableHeaderBlock)
 	if (toolDefinitions) ansStrs.push(toolDefinitions)
-	ansStrs.push(importantDetails)
-	ansStrs.push(fsInfo)
+	ansStrs.push(stablePolicyBlock)
+	ansStrs.push(semiStableWorkspaceBlock)
+	ansStrs.push(volatileRuntimeBlock)
 
 	const fullSystemMsgStr = ansStrs
 		.join('\n\n\n')
