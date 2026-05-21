@@ -302,7 +302,12 @@ export class TerminalToolService extends Disposable implements ITerminalToolServ
 			// Prefer the structured command-detection capability when available
 
 			const waitUntilDone = new Promise<void>(resolve => {
-				if (!cmdCap) return
+				if (!cmdCap) {
+					// If CommandDetection capability is not available, we can't detect command completion.
+					// Fall back to the timeout-based mechanism below.
+					resolve()
+					return
+				}
 				const l = cmdCap.onCommandFinished(cmd => {
 					if (resolveReason) return // already resolved
 					resolveReason = { type: 'done', exitCode: cmd.exitCode ?? 0 };
@@ -313,10 +318,8 @@ export class TerminalToolService extends Disposable implements ITerminalToolServ
 				disposables.push(l)
 			})
 
-
-			// send the command now that listeners are attached
-			await terminal.sendText(command, true)
-
+			// Create timeout/interrupt mechanism BEFORE sendText, so that if sendText
+			// blocks for any reason, the function will still time out instead of hanging forever.
 			const waitUntilInterrupt = isPersistent ?
 				// timeout after X seconds
 				new Promise<void>((res) => {
@@ -351,6 +354,9 @@ export class TerminalToolService extends Disposable implements ITerminalToolServ
 					}));
 					resetTimer();
 				})
+
+			// send the command now that listeners and timeout mechanisms are attached
+			await terminal.sendText(command, true)
 
 			// wait for result
 			await Promise.any([waitUntilDone, waitUntilInterrupt])
