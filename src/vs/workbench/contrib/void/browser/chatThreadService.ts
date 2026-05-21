@@ -44,6 +44,7 @@ import { RawMCPToolCall } from '../common/mcpServiceTypes.js';
 // related to retrying when LLM message has error
 const CHAT_RETRIES = 3
 const RETRY_DELAY = 2500
+const LLM_STREAM_STATE_THROTTLE_MS = 33
 
 
 const findStagingSelectionIndex = (currentSelections: StagingSelectionItem[] | undefined, newSelection: StagingSelectionItem): number | null => {
@@ -419,6 +420,11 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 	}, 500));
 
 	private _latestThreads: ChatThreads | null = null;
+	private readonly _pendingLLMStreamState = new Map<string, {
+		llmInfo: NonNullable<Extract<ThreadStreamState[string], { isRunning: 'LLM' }>['llmInfo']>;
+		interrupt: Promise<() => void>;
+	}>();
+	private readonly _llmStreamStateSchedulers = new Map<string, RunOnceScheduler>();
 
 	private _writeThreadsSync(threads: ChatThreads) {
 		const serializedThreads = JSON.stringify(threads);
@@ -439,12 +445,52 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 		this._writeThreadsSync(threads);
 	}
 
+	private _createMountedInfo(threadId: string): NonNullable<ThreadType['state']['mountedInfo']> {
+		let whenMountedResolver: (w: WhenMounted) => void = () => { }
+		const whenMountedPromise = new Promise<WhenMounted>((res) => { whenMountedResolver = res })
+
+		return {
+			whenMounted: whenMountedPromise,
+			mountedIsResolvedRef: { current: false },
+			_whenMountedResolver: (w: WhenMounted) => {
+				whenMountedResolver(w)
+				const mountInfo = this.state.allThreads[threadId]?.state.mountedInfo
+				if (mountInfo) mountInfo.mountedIsResolvedRef.current = true
+			},
+		}
+	}
+
 
 	// this should be the only place this.state = ... appears besides constructor
 	private _setState(state: Partial<ThreadsState>, doNotRefreshMountInfo?: boolean) {
-		const newState = {
+		let newState = {
 			...this.state,
 			...state
+		}
+
+		if (!doNotRefreshMountInfo) {
+			const threadId = newState.currentThreadId
+			const thread = newState.allThreads[threadId]
+			const needsMountedInfo = !!thread && (
+				threadId !== this.state.currentThreadId ||
+				!thread.state.mountedInfo
+			)
+
+			if (needsMountedInfo) {
+				newState = {
+					...newState,
+					allThreads: {
+						...newState.allThreads,
+						[thread.id]: {
+							...thread,
+							state: {
+								...thread.state,
+								mountedInfo: this._createMountedInfo(threadId),
+							}
+						}
+					}
+				}
+			}
 		}
 
 		this.state = newState
@@ -471,34 +517,39 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 			}
 
 		}
-
-
-		// if we did not just set the state to true, set mount info
-		if (doNotRefreshMountInfo) return
-
-		let whenMountedResolver: (w: WhenMounted) => void
-		const whenMountedPromise = new Promise<WhenMounted>((res) => whenMountedResolver = res)
-
-		this._setThreadState(threadId, {
-			mountedInfo: {
-				whenMounted: whenMountedPromise,
-				mountedIsResolvedRef: { current: false },
-				_whenMountedResolver: (w: WhenMounted) => {
-					whenMountedResolver(w)
-					const mountInfo = this.state.allThreads[threadId]?.state.mountedInfo
-					if (mountInfo) mountInfo.mountedIsResolvedRef.current = true
-				},
-			}
-		}, true) // do not trigger an update
-
-
-
 	}
 
 
 	private _setStreamState(threadId: string, state: ThreadStreamState[string]) {
+		if (state?.isRunning !== 'LLM') {
+			this._pendingLLMStreamState.delete(threadId)
+			this._llmStreamStateSchedulers.get(threadId)?.cancel()
+		}
 		this.streamState[threadId] = state
 		this._onDidChangeStreamState.fire({ threadId })
+	}
+
+	private _getOrCreateLLMStreamScheduler(threadId: string) {
+		let scheduler = this._llmStreamStateSchedulers.get(threadId)
+		if (!scheduler) {
+			scheduler = this._register(new RunOnceScheduler(() => {
+				this._flushPendingLLMStreamState(threadId)
+			}, LLM_STREAM_STATE_THROTTLE_MS))
+			this._llmStreamStateSchedulers.set(threadId, scheduler)
+		}
+		return scheduler
+	}
+
+	private _scheduleLLMStreamState(threadId: string, llmInfo: NonNullable<Extract<ThreadStreamState[string], { isRunning: 'LLM' }>['llmInfo']>, interrupt: Promise<() => void>) {
+		this._pendingLLMStreamState.set(threadId, { llmInfo, interrupt })
+		this._getOrCreateLLMStreamScheduler(threadId).schedule()
+	}
+
+	private _flushPendingLLMStreamState(threadId: string) {
+		const pendingState = this._pendingLLMStreamState.get(threadId)
+		if (!pendingState) return
+		this._pendingLLMStreamState.delete(threadId)
+		this._setStreamState(threadId, { isRunning: 'LLM', llmInfo: pendingState.llmInfo, interrupt: pendingState.interrupt })
 	}
 
 
@@ -577,7 +628,8 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 
 		// add assistant message
 		if (this.streamState[threadId]?.isRunning === 'LLM') {
-			const { displayContentSoFar, reasoningSoFar, toolCallSoFar } = this.streamState[threadId].llmInfo
+			this._flushPendingLLMStreamState(threadId)
+			const { displayContentSoFar, reasoningSoFar, toolCallSoFar } = this.streamState[threadId]?.llmInfo ?? { displayContentSoFar: '', reasoningSoFar: '', toolCallSoFar: null }
 			this._addMessageToThread(threadId, { role: 'aborted_assistant', displayContent: displayContentSoFar, reasoning: reasoningSoFar, anthropicReasoning: null })
 			if (toolCallSoFar) this._addMessageToThread(threadId, { role: 'interrupted_streaming_tool', name: toolCallSoFar.name, mcpServerName: this._computeMCPServerOfToolName(toolCallSoFar.name) })
 		}
@@ -841,7 +893,11 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 					logging: { loggingName: `Chat - ${chatMode}`, loggingExtras: { threadId, nMessagesSent, chatMode } },
 					separateSystemMessage: separateSystemMessage,
 					onText: ({ fullText, fullReasoning, toolCall }) => {
-						this._setStreamState(threadId, { isRunning: 'LLM', llmInfo: { displayContentSoFar: fullText, reasoningSoFar: fullReasoning, toolCallSoFar: toolCall ?? null }, interrupt: Promise.resolve(() => { if (llmCancelToken) this._llmMessageService.abort(llmCancelToken) }) })
+						this._scheduleLLMStreamState(
+							threadId,
+							{ displayContentSoFar: fullText, reasoningSoFar: fullReasoning, toolCallSoFar: toolCall ?? null },
+							Promise.resolve(() => { if (llmCancelToken) this._llmMessageService.abort(llmCancelToken) })
+						)
 					},
 					onFinalMessage: async ({ fullText, fullReasoning, toolCall, anthropicReasoning, }) => {
 						resMessageIsDonePromise({ type: 'llmDone', toolCall, info: { fullText, fullReasoning, anthropicReasoning } }) // resolve with tool calls
@@ -893,6 +949,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 					// error, but too many attempts
 					else {
 						const { error } = llmRes
+						this._flushPendingLLMStreamState(threadId)
 						const { displayContentSoFar, reasoningSoFar, toolCallSoFar } = this.streamState[threadId].llmInfo
 						this._addMessageToThread(threadId, { role: 'assistant', displayContent: displayContentSoFar, reasoning: reasoningSoFar, anthropicReasoning: null })
 						if (toolCallSoFar) this._addMessageToThread(threadId, { role: 'interrupted_streaming_tool', name: toolCallSoFar.name, mcpServerName: this._computeMCPServerOfToolName(toolCallSoFar.name) })
@@ -968,7 +1025,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 				],
 			}
 		}
-		this._storeAllThreadsImmediate(newThreads)
+		this._storeAllThreads(newThreads)
 		this._setState({ allThreads: newThreads }) // the current thread just changed (it had a message added to it)
 	}
 

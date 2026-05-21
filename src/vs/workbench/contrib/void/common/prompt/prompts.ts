@@ -106,7 +106,9 @@ ${tripleTick[1]}`
 const replaceTool_description = `\
 A string of SEARCH/REPLACE block(s) which will be applied to the given file.
 Your SEARCH/REPLACE blocks string must be formatted as follows:
+${tripleTick[0]}
 ${searchReplaceBlockTemplate}
+${tripleTick[1]}
 
 ## Guidelines:
 
@@ -442,6 +444,31 @@ const systemToolsXMLPrompt = (chatMode: ChatMode, mcpTools: InternalToolInfo[] |
     - I will inspect the repository structure first.
       <get_dir_tree><uri>/repo</uri></get_dir_tree>
 
+    ## ❌ Tool Call Formatting - DO NOT
+
+    Use ONE tool call per response. NEVER output multiple tool calls in one message.
+
+    Each XML tag must be EXACTLY one opening \`<tagname>\` and one closing \`</tagname>\`. Do NOT repeat closing tags, do NOT insert extra whitespace inside closing tags, and NEVER omit the final \`>\`.
+
+    Incorrect (forbidden):
+    ${tripleTick[0]}
+    </edit_file
+        </edit_file
+        </edit_file
+    ${tripleTick[1]}
+    ${tripleTick[0]}
+    </edit_file >
+    ${tripleTick[1]}
+
+    Correct:
+    ${tripleTick[0]}
+    </edit_file>
+    ${tripleTick[1]}
+
+    The SEARCH/REPLACE blocks inside \`<edit_file>\` are a SINGLE string value, NOT a separate XML body. Do NOT treat the blocks as nested tool calls.
+
+    If you are uncertain about the correct formatting, output a single small block and stop. Never produce fragmented or repeated closing tags under any circumstances.
+
     Execution details:
     - You are only allowed to output ONE tool call per response.
     - Your tool call will be executed immediately, and the result will appear in the following user message.`)
@@ -557,6 +584,7 @@ Here's an example of a good code block:\n${chatSuggestionDiffExample}`)
 	}
 
 	details.push(`When providing a code review or performance analysis, use this structure when useful: Summary; Findings ordered by severity; Evidence; Recommendation; Verification performed; Remaining risks.`)
+	details.push('When suggesting a terminal command or showing a command example in your response text, always use markdown code blocks (```shell ... ```). Never write raw XML tags like <grep> or <npm> or <node> in your response text, because the system will try to parse them as tool calls and fail.')
 	details.push(`Always use MARKDOWN to format lists, bullet points, etc. Do NOT write tables.`)
 
 	const stablePolicyBlock = (`Important notes:

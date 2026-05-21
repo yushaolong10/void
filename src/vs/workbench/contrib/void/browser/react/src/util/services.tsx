@@ -315,6 +315,28 @@ export const useFullChatThreadsStreamState = () => {
 	return s
 }
 
+const computeIsAnyThreadRunning = (exceptThreadId?: string) => {
+	for (const threadId in chatThreadsStreamState) {
+		if (threadId === exceptThreadId) continue
+		if (chatThreadsStreamState[threadId]?.isRunning) return true
+	}
+	return false
+}
+
+export const useIsAnyThreadRunning = (exceptThreadId?: string) => {
+	const [s, ss] = useState(() => computeIsAnyThreadRunning(exceptThreadId))
+	useEffect(() => {
+		ss(computeIsAnyThreadRunning(exceptThreadId))
+		const listener = () => {
+			const next = computeIsAnyThreadRunning(exceptThreadId)
+			ss(prev => prev === next ? prev : next)
+		}
+		chatThreadsStreamStateListeners.add(listener)
+		return () => { chatThreadsStreamStateListeners.delete(listener) }
+	}, [exceptThreadId])
+	return s
+}
+
 
 
 export const useRefreshModelState = () => {

@@ -3,12 +3,11 @@
  *  Licensed under the Apache License, Version 2.0. See LICENSE.txt for more information.
  *--------------------------------------------------------------------------------------*/
 
-import { useMemo, useState } from 'react';
-import { CopyButton, IconShell1 } from '../markdown/ApplyBlockHoverButtons.js';
-import { useAccessor, useChatThreadsState, useChatThreadsStreamState, useFullChatThreadsStreamState, useSettingsState } from '../util/services.js';
-import { IconX } from './SidebarChat.js';
+import { useState } from 'react';
+import { IconShell1 } from '../markdown/ApplyBlockHoverButtons.js';
+import { useAccessor, useChatThreadsState, useChatThreadsStreamState } from '../util/services.js';
 import { Check, Copy, Icon, LoaderCircle, MessageCircleQuestion, Trash2, UserCheck, X } from 'lucide-react';
-import { IsRunningType, ThreadType } from '../../../chatThreadService.js';
+import { ThreadType } from '../../../chatThreadService.js';
 
 
 const numInitialThreads = 3
@@ -20,14 +19,6 @@ export const PastThreadsList = ({ className = '' }: { className?: string }) => {
 
 	const threadsState = useChatThreadsState()
 	const { allThreads } = threadsState
-
-	const streamState = useFullChatThreadsStreamState()
-
-	const runningThreadIds: { [threadId: string]: IsRunningType | undefined } = {}
-	for (const threadId in streamState) {
-		const isRunning = streamState[threadId]?.isRunning
-		if (isRunning) { runningThreadIds[threadId] = isRunning }
-	}
 
 	if (!allThreads) {
 		return <div key="error" className="p-1">{`Error accessing chat history.`}</div>;
@@ -59,7 +50,6 @@ export const PastThreadsList = ({ className = '' }: { className?: string }) => {
 							idx={i}
 							hoveredIdx={hoveredIdx}
 							setHoveredIdx={setHoveredIdx}
-							isRunning={runningThreadIds[pastThread.id]}
 						/>
 					);
 				})
@@ -168,16 +158,15 @@ const TrashButton = ({ threadId }: { threadId: string }) => {
 	)
 }
 
-const PastThreadElement = ({ pastThread, idx, hoveredIdx, setHoveredIdx, isRunning }: {
+const PastThreadElement = ({ pastThread, idx, hoveredIdx, setHoveredIdx }: {
 	pastThread: ThreadType,
 	idx: number,
 	hoveredIdx: number | null,
 	setHoveredIdx: (idx: number | null) => void,
-	isRunning: IsRunningType | undefined,
 }
 
 ) => {
-
+	const isRunning = useChatThreadsStreamState(pastThread.id)?.isRunning
 
 	const accessor = useAccessor()
 	const chatThreadsService = accessor.get('IChatThreadService')

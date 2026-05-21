@@ -6,7 +6,7 @@
 import React, { ButtonHTMLAttributes, FormEvent, FormHTMLAttributes, Fragment, KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 
-import { useAccessor, useChatThreadsState, useChatThreadsStreamState, useSettingsState, useActiveURI, useCommandBarState, useFullChatThreadsStreamState } from '../util/services.js';
+import { useAccessor, useChatThreadsState, useChatThreadsStreamState, useSettingsState, useActiveURI, useCommandBarState, useFullChatThreadsStreamState, useIsAnyThreadRunning } from '../util/services.js';
 import { ScrollType } from '../../../../../../../editor/common/editorCommon.js';
 
 import { ChatMarkdownRender, ChatMessageLocation, getApplyBoxId } from '../markdown/ChatMarkdownRender.js';
@@ -2451,13 +2451,13 @@ const builtinToolNameToComponent: { [T in BuiltinToolName]: { resultWrapper: Res
 const Checkpoint = ({ message, threadId, messageIdx, isCheckpointGhost, threadIsRunning }: { message: CheckpointEntry, threadId: string; messageIdx: number, isCheckpointGhost: boolean, threadIsRunning: boolean }) => {
 	const accessor = useAccessor()
 	const chatThreadService = accessor.get('IChatThreadService')
-	const streamState = useFullChatThreadsStreamState()
 
 	const isRunning = useChatThreadsStreamState(threadId)?.isRunning
+	const anotherThreadIsRunning = useIsAnyThreadRunning(threadId)
 	const isDisabled = useMemo(() => {
 		if (isRunning) return true
-		return !!Object.keys(streamState).find((threadId2) => streamState[threadId2]?.isRunning)
-	}, [isRunning, streamState])
+		return anotherThreadIsRunning
+	}, [anotherThreadIsRunning, isRunning])
 
 	return <div
 		className={`flex items-center justify-center px-2 `}
