@@ -13,11 +13,11 @@ import { ShallowDirectoryItem, BuiltinToolCallParams, BuiltinToolResultType } fr
 import { MAX_CHILDREN_URIs_PAGE, MAX_DIRSTR_CHARS_TOTAL_BEGINNING, MAX_DIRSTR_CHARS_TOTAL_TOOL } from './prompt/prompts.js';
 
 
-const MAX_FILES_TOTAL = 1000;
+const MAX_FILES_TOTAL = 500; //1000
 
 
-const START_MAX_DEPTH = Infinity;
-const START_MAX_ITEMS_PER_DIR = Infinity; // Add start value as Infinity
+const START_MAX_DEPTH = 5; //Infinity;
+const START_MAX_ITEMS_PER_DIR = 10; //Infinity; // Add start value as Infinity
 
 const DEFAULT_MAX_DEPTH = 3;
 const DEFAULT_MAX_ITEMS_PER_DIR = 3;
