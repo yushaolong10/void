@@ -125,23 +125,12 @@ export const IconLoading = ({ className = '' }: { className?: string }) => {
 	const [loadingText, setLoadingText] = useState('.');
 
 	useEffect(() => {
-		let intervalId;
+		const intervalId = setInterval(() => {
+			setLoadingText(prev => prev === '...' ? '.' : prev + '.')
+		}, 300);
 
-		// Function to handle the animation
-		const toggleLoadingText = () => {
-			if (loadingText === '...') {
-				setLoadingText('.');
-			} else {
-				setLoadingText(loadingText + '.');
-			}
-		};
-
-		// Start the animation loop
-		intervalId = setInterval(toggleLoadingText, 300);
-
-		// Cleanup function to clear the interval when component unmounts
 		return () => clearInterval(intervalId);
-	}, [loadingText, setLoadingText]);
+	}, []);
 
 	return <div className={`${className}`}>{loadingText}</div>;
 

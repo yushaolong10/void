@@ -264,6 +264,7 @@ const openSourceModelOptions_assumingOAICompat = {
 	'deepseekV4Flash': {
 		supportsFIM: false,
 		supportsSystemMessage: 'system-role',
+		specialToolFormat: 'openai-style',
 		reasoningCapabilities: { supportsReasoning: true, canTurnOffReasoning: true, canIOReasoning: true, openSourceThinkTags: ['<think>', '</think>'] },
 		contextWindow: 1_000_000, reservedOutputTokenSpace: 384_000,
 	},

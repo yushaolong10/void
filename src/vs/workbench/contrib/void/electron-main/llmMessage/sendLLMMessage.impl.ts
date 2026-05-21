@@ -55,6 +55,53 @@ export type ListParams_Internal<ModelResponse> = ModelListParams<ModelResponse>
 
 
 const invalidApiKeyMessage = (providerName: ProviderName) => `Invalid ${displayInfoOfProviderName(providerName).title} API key.`
+const LLM_STREAM_STALL_TIMEOUT_MS = 120_000
+
+const createLLMStreamWatchdog = ({
+	providerName,
+	modelName,
+	onError,
+	onAbort,
+}: {
+	providerName: ProviderName;
+	modelName: string;
+	onError: OnError;
+	onAbort: () => void;
+}) => {
+	let timeoutHandle: ReturnType<typeof setTimeout> | null = null
+	let didFire = false
+
+	const clear = () => {
+		if (timeoutHandle) {
+			clearTimeout(timeoutHandle)
+			timeoutHandle = null
+		}
+	}
+
+	const schedule = () => {
+		clear()
+		timeoutHandle = setTimeout(() => {
+			if (didFire) return
+			didFire = true
+			try { onAbort() } catch { }
+			onError({
+				message: `Void: ${displayInfoOfProviderName(providerName).title} model "${modelName}" stopped streaming for ${Math.floor(LLM_STREAM_STALL_TIMEOUT_MS / 1000)} seconds, so the request was aborted.`,
+				fullError: null
+			})
+		}, LLM_STREAM_STALL_TIMEOUT_MS)
+	}
+
+	return {
+		bump: () => {
+			if (didFire) return
+			schedule()
+		},
+		clear,
+		get didFire() {
+			return didFire
+		}
+	}
+}
 
 // ------------ OPENAI-COMPATIBLE (HELPERS) ------------
 
@@ -337,51 +384,64 @@ const _sendOpenAICompatibleChat = async ({ messages, onText, onFinalMessage, onE
 		.create(options)
 		.then(async response => {
 			_setAborter(() => response.controller.abort())
-			// when receive text
-			for await (const chunk of response) {
-				// message
-				const newText = chunk.choices[0]?.delta?.content ?? ''
-				fullTextSoFar += newText
+			const watchdog = createLLMStreamWatchdog({
+				providerName,
+				modelName,
+				onError,
+				onAbort: () => response.controller.abort(),
+			})
+			watchdog.bump()
+			try {
+				// when receive text
+				for await (const chunk of response) {
+					watchdog.bump()
+					// message
+					const newText = chunk.choices[0]?.delta?.content ?? ''
+					fullTextSoFar += newText
 
-				// tool call
-				for (const tool of chunk.choices[0]?.delta?.tool_calls ?? []) {
-					const index = tool.index
-					if (index !== 0) continue
+					// tool call
+					for (const tool of chunk.choices[0]?.delta?.tool_calls ?? []) {
+						const index = tool.index
+						if (index !== 0) continue
 
-					toolName += tool.function?.name ?? ''
-					toolParamsStr += tool.function?.arguments ?? '';
-					toolId += tool.id ?? ''
+						toolName += tool.function?.name ?? ''
+						toolParamsStr += tool.function?.arguments ?? '';
+						toolId += tool.id ?? ''
+					}
+
+
+					// reasoning
+					let newReasoning = ''
+					if (nameOfReasoningFieldInDelta) {
+						// @ts-ignore
+						newReasoning = (chunk.choices[0]?.delta?.[nameOfReasoningFieldInDelta] || '') + ''
+						fullReasoningSoFar += newReasoning
+					}
+
+					// call onText
+					onText({
+						fullText: fullTextSoFar,
+						fullReasoning: fullReasoningSoFar,
+						toolCall: !toolName ? undefined : { name: toolName, rawParams: {}, isDone: false, doneParams: [], id: toolId },
+					})
+
 				}
-
-
-				// reasoning
-				let newReasoning = ''
-				if (nameOfReasoningFieldInDelta) {
-					// @ts-ignore
-					newReasoning = (chunk.choices[0]?.delta?.[nameOfReasoningFieldInDelta] || '') + ''
-					fullReasoningSoFar += newReasoning
+				// on final
+				if (!fullTextSoFar && !fullReasoningSoFar && !toolName) {
+					onError({ message: 'Void: Response from model was empty.', fullError: null })
 				}
-
-				// call onText
-				onText({
-					fullText: fullTextSoFar,
-					fullReasoning: fullReasoningSoFar,
-					toolCall: !toolName ? undefined : { name: toolName, rawParams: {}, isDone: false, doneParams: [], id: toolId },
-				})
-
-			}
-			// on final
-			if (!fullTextSoFar && !fullReasoningSoFar && !toolName) {
-				onError({ message: 'Void: Response from model was empty.', fullError: null })
-			}
-			else {
-				const toolCall = rawToolCallObjOfParamsStr(toolName, toolParamsStr, toolId)
-				const toolCallObj = toolCall ? { toolCall } : {}
-				onFinalMessage({ fullText: fullTextSoFar, fullReasoning: fullReasoningSoFar, anthropicReasoning: null, ...toolCallObj });
+				else {
+					const toolCall = rawToolCallObjOfParamsStr(toolName, toolParamsStr, toolId)
+					const toolCallObj = toolCall ? { toolCall } : {}
+					onFinalMessage({ fullText: fullTextSoFar, fullReasoning: fullReasoningSoFar, anthropicReasoning: null, ...toolCallObj });
+				}
+			} finally {
+				watchdog.clear()
 			}
 		})
 		// when error/fail - this catches errors of both .create() and .then(for await)
 		.catch(error => {
+			if ((error as any)?.name === 'AbortError') return
 			if (error instanceof OpenAI.APIError && error.status === 401) { onError({ message: invalidApiKeyMessage(providerName), fullError: error }); }
 			else { onError({ message: error + '', fullError: error }); }
 		})
@@ -516,8 +576,16 @@ const sendAnthropicChat = async ({ messages, providerName, onText, onFinalMessag
 			toolCall: !fullToolName ? undefined : { name: fullToolName, rawParams: {}, isDone: false, doneParams: [], id: 'dummy' },
 		})
 	}
+	const watchdog = createLLMStreamWatchdog({
+		providerName,
+		modelName,
+		onError,
+		onAbort: () => stream.controller.abort(),
+	})
+	watchdog.bump()
 	// there are no events for tool_use, it comes in at the end
 	stream.on('streamEvent', e => {
+		watchdog.bump()
 		// start block
 		if (e.type === 'content_block_start') {
 			if (e.content_block.type === 'text') {
@@ -561,6 +629,7 @@ const sendAnthropicChat = async ({ messages, providerName, onText, onFinalMessag
 
 	// on done - (or when error/fail) - this is called AFTER last streamEvent
 	stream.on('finalMessage', (response) => {
+		watchdog.clear()
 		const anthropicReasoning = response.content.filter(c => c.type === 'thinking' || c.type === 'redacted_thinking')
 		const tools = response.content.filter(c => c.type === 'tool_use')
 		// console.log('TOOLS!!!!!!', JSON.stringify(tools, null, 2))
@@ -572,6 +641,8 @@ const sendAnthropicChat = async ({ messages, providerName, onText, onFinalMessag
 	})
 	// on error
 	stream.on('error', (error) => {
+		watchdog.clear()
+		if ((error as any)?.name === 'AbortError') return
 		if (error instanceof Anthropic.APIError && error.status === 401) { onError({ message: invalidApiKeyMessage(providerName), fullError: error }) }
 		else { onError({ message: error + '', fullError: error }) }
 	})
@@ -789,43 +860,55 @@ const sendGeminiChat = async ({
 	})
 		.then(async (stream) => {
 			_setAborter(() => { stream.return(fullTextSoFar); });
+			const watchdog = createLLMStreamWatchdog({
+				providerName,
+				modelName,
+				onError,
+				onAbort: () => { stream.return(fullTextSoFar); },
+			})
+			watchdog.bump()
+			try {
+				// Process the stream
+				for await (const chunk of stream) {
+					watchdog.bump()
+					// message
+					const newText = chunk.text ?? ''
+					fullTextSoFar += newText
 
-			// Process the stream
-			for await (const chunk of stream) {
-				// message
-				const newText = chunk.text ?? ''
-				fullTextSoFar += newText
+					// tool call
+					const functionCalls = chunk.functionCalls
+					if (functionCalls && functionCalls.length > 0) {
+						const functionCall = functionCalls[0] // Get the first function call
+						toolName = functionCall.name ?? ''
+						toolParamsStr = JSON.stringify(functionCall.args ?? {})
+						toolId = functionCall.id ?? ''
+					}
 
-				// tool call
-				const functionCalls = chunk.functionCalls
-				if (functionCalls && functionCalls.length > 0) {
-					const functionCall = functionCalls[0] // Get the first function call
-					toolName = functionCall.name ?? ''
-					toolParamsStr = JSON.stringify(functionCall.args ?? {})
-					toolId = functionCall.id ?? ''
+					// (do not handle reasoning yet)
+
+					// call onText
+					onText({
+						fullText: fullTextSoFar,
+						fullReasoning: fullReasoningSoFar,
+						toolCall: !toolName ? undefined : { name: toolName, rawParams: {}, isDone: false, doneParams: [], id: toolId },
+					})
 				}
 
-				// (do not handle reasoning yet)
-
-				// call onText
-				onText({
-					fullText: fullTextSoFar,
-					fullReasoning: fullReasoningSoFar,
-					toolCall: !toolName ? undefined : { name: toolName, rawParams: {}, isDone: false, doneParams: [], id: toolId },
-				})
-			}
-
-			// on final
-			if (!fullTextSoFar && !fullReasoningSoFar && !toolName) {
-				onError({ message: 'Void: Response from model was empty.', fullError: null })
-			} else {
-				if (!toolId) toolId = generateUuid() // ids are empty, but other providers might expect an id
-				const toolCall = rawToolCallObjOfParamsStr(toolName, toolParamsStr, toolId)
-				const toolCallObj = toolCall ? { toolCall } : {}
-				onFinalMessage({ fullText: fullTextSoFar, fullReasoning: fullReasoningSoFar, anthropicReasoning: null, ...toolCallObj });
+				// on final
+				if (!fullTextSoFar && !fullReasoningSoFar && !toolName) {
+					onError({ message: 'Void: Response from model was empty.', fullError: null })
+				} else {
+					if (!toolId) toolId = generateUuid() // ids are empty, but other providers might expect an id
+					const toolCall = rawToolCallObjOfParamsStr(toolName, toolParamsStr, toolId)
+					const toolCallObj = toolCall ? { toolCall } : {}
+					onFinalMessage({ fullText: fullTextSoFar, fullReasoning: fullReasoningSoFar, anthropicReasoning: null, ...toolCallObj });
+				}
+			} finally {
+				watchdog.clear()
 			}
 		})
 		.catch(error => {
+			if ((error as any)?.name === 'AbortError') return
 			const message = error?.message
 			if (typeof message === 'string') {
 

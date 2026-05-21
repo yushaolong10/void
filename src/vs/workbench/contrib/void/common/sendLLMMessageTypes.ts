@@ -46,6 +46,7 @@ export type OpenAILLMChatMessage = {
 } | {
 	role: 'assistant',
 	content: string | (AnthropicReasoning | { type: 'text'; text: string })[];
+	reasoning_content?: string;
 	tool_calls?: { type: 'function'; id: string; function: { name: string; arguments: string; } }[];
 } | {
 	role: 'tool',
@@ -209,7 +210,6 @@ export type MainModelListParams<modelResponse> = Omit<ModelListParams<modelRespo
 
 export type EventModelListOnSuccessParams<modelResponse> = Parameters<ModelListParams<modelResponse>['onSuccess']>[0] & { requestId: string }
 export type EventModelListOnErrorParams<modelResponse> = Parameters<ModelListParams<modelResponse>['onError']>[0] & { requestId: string }
-
 
 
 

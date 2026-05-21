@@ -35,6 +35,7 @@ type SimpleLLMMessage = {
 } | {
 	role: 'assistant';
 	content: string;
+	reasoning: string;
 	anthropicReasoning: AnthropicReasoning[] | null;
 }
 
@@ -79,6 +80,14 @@ const prepareMessages_openai_tools = (messages: SimpleLLMMessage[]): AnthropicOr
 		const currMsg = messages[i]
 
 		if (currMsg.role !== 'tool') {
+			if (currMsg.role === 'assistant') {
+				newMessages.push({
+					role: 'assistant',
+					content: currMsg.content,
+					reasoning_content: currMsg.reasoning || undefined,
+				})
+				continue
+			}
 			newMessages.push(currMsg)
 			continue
 		}
@@ -403,6 +412,11 @@ const prepareOpenAIOrAnthropicMessages = ({
 
 		// if content is a string, replace string with empty msg
 		if (typeof currMsg.content === 'string') {
+			// OpenAI-compatible assistant tool calls may legitimately have empty content.
+			if (currMsg.role === 'assistant' && ('tool_calls' in currMsg) && currMsg.tool_calls?.length) {
+				continue
+			}
+			if (nextMsg?.role === 'tool') continue
 			currMsg.content = currMsg.content || EMPTY_MESSAGE
 		}
 		else {
@@ -737,20 +751,22 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 			if (m.role === 'interrupted_streaming_tool') continue
 			if (m.role === 'aborted_assistant') {
 				// mark aborted content so the LLM knows not to continue it
-				simpleLLMMessages.push({
-					role: 'assistant',
-					content: '[The previous response was interrupted by the user. Ignore the above and continue with the latest question.]',
-					anthropicReasoning: null,
-				})
-				continue
-			}
-			if (m.role === 'assistant') {
-				simpleLLMMessages.push({
-					role: m.role,
-					content: m.displayContent,
-					anthropicReasoning: m.anthropicReasoning,
-				})
-			}
+					simpleLLMMessages.push({
+						role: 'assistant',
+						content: '[The previous response was interrupted by the user. Ignore the above and continue with the latest question.]',
+						reasoning: '',
+						anthropicReasoning: null,
+					})
+					continue
+				}
+				if (m.role === 'assistant') {
+					simpleLLMMessages.push({
+						role: m.role,
+						content: m.displayContent,
+						reasoning: m.reasoning,
+						anthropicReasoning: m.anthropicReasoning,
+					})
+				}
 			else if (m.role === 'tool') {
 				simpleLLMMessages.push({
 					role: m.role,

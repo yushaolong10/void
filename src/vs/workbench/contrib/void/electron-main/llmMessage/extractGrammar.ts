@@ -165,8 +165,43 @@ const findIndexOfAny = (fullText: string, matches: string[]) => {
 
 
 type ToolOfToolName = { [toolName: string]: InternalToolInfo | undefined }
+const LARGE_STREAMING_XML_TOOLS = new Set<ToolName>(['edit_file', 'rewrite_file'])
 
 const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+const extractStreamingParamValue = (sourceText: string, paramName: string): { value: string, done: boolean } | null => {
+	const openTag = `<${paramName}>`
+	const openIdx = sourceText.indexOf(openTag)
+	if (openIdx === -1) return null
+
+	const startIdx = openIdx + openTag.length
+	const closeTag = `</${paramName}>`
+	const closeIdx = sourceText.indexOf(closeTag, startIdx)
+	if (closeIdx === -1) {
+		return { value: sourceText.substring(startIdx), done: false }
+	}
+
+	return { value: sourceText.substring(startIdx, closeIdx), done: true }
+}
+
+const parseXMLPrefixToToolCallLightweight = <T extends ToolName>(toolName: T, toolId: string, str: string): RawToolCallObj => {
+	const rawParams: RawToolParamsObj = {}
+	const doneParams: ToolParamName<T>[] = []
+
+		const uriInfo = extractStreamingParamValue(str, 'uri')
+		if (uriInfo) {
+			rawParams.uri = trimBeforeAndAfterNewLines(uriInfo.value)
+			if (uriInfo.done) doneParams.push('uri' as ToolParamName<T>)
+		}
+
+	return {
+		name: toolName,
+		rawParams,
+		doneParams,
+		isDone: str.includes(`</${toolName}>`),
+		id: toolId,
+	}
+}
 
 const stripTrailingXMLClosers = (s: string, toolName: ToolName) => {
 	return s
@@ -462,12 +497,19 @@ export const extractXMLToolsWrapper = (
 
 		// toolTagIdx is not null, so parse the XML
 		if (foundOpenTag !== null) {
-			latestToolCall = parseXMLPrefixToToolCall(
-				foundOpenTag.toolName,
-				toolId,
-				trueFullText.substring(foundOpenTag.idx, Infinity),
-				toolOfToolName,
-			)
+			const toolSourceText = trueFullText.substring(foundOpenTag.idx, Infinity)
+			latestToolCall = LARGE_STREAMING_XML_TOOLS.has(foundOpenTag.toolName)
+				? parseXMLPrefixToToolCallLightweight(
+					foundOpenTag.toolName,
+					toolId,
+					toolSourceText,
+				)
+				: parseXMLPrefixToToolCall(
+					foundOpenTag.toolName,
+					toolId,
+					toolSourceText,
+					toolOfToolName,
+				)
 		}
 		else {
 			const reasoningToolCall = extractToolCallFromSourceText(trueFullReasoning, toolId, toolOfToolName)
