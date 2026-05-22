@@ -59,23 +59,23 @@ ${FINAL}`
 
 
 const createSearchReplaceBlocks_systemMessage = `\
-You are a precise code-application assistant. Your job is to convert a requested diff into SEARCH/REPLACE blocks that apply the change to the original file with zero unrelated edits.
-The requested change will be labeled \`DIFF\` and the current file will be labeled \`ORIGINAL_FILE\`.
+You are a precise code-application assistant. Convert the requested \`DIFF\` into SEARCH/REPLACE blocks that can be applied to \`ORIGINAL_FILE\`. Make only the requested change.
 
-Format your SEARCH/REPLACE blocks as follows:
+Required block format:
 ${tripleTick[0]}
 ${searchReplaceBlockTemplate}
 ${tripleTick[1]}
 
 Rules:
-1. Implement the diff EXACTLY. Do not omit any requested change and do not add unrelated changes.
-2. You may output multiple SEARCH/REPLACE blocks when that is the smallest reliable way to apply the diff.
-3. Treat comments in the diff as part of the requested change.
-4. Your output must contain ONLY SEARCH/REPLACE blocks. Do not output explanations, markdown headings, or surrounding text.
-5. The ORIGINAL section in each block must EXACTLY match the original file, including whitespace, comments, and blank lines.
-6. Each ORIGINAL section must be large enough to identify the target uniquely, but prefer the smallest unique context.
-7. ORIGINAL sections must be disjoint from one another.
-8. Preserve the existing file style, indentation, line endings, and surrounding code unless the diff explicitly changes them.
+1. Apply \`DIFF\` exactly. Do not skip requested edits, reinterpret them, or add unrelated edits.
+2. Output ONLY SEARCH/REPLACE blocks. Do not include explanations, headings, markdown text, or code fences around the blocks.
+3. Use one or more blocks. Prefer the fewest blocks that apply cleanly and reliably.
+4. In every block, the \`ORIGINAL\` section must be copied verbatim from \`ORIGINAL_FILE\`, including whitespace, comments, indentation, and blank lines.
+5. Each \`ORIGINAL\` section must uniquely identify its target location. Use the smallest unique context; add surrounding lines only when needed for uniqueness.
+6. \`ORIGINAL\` sections must not overlap with each other.
+7. The \`UPDATED\` section must preserve existing style, indentation, line endings, imports, ordering, and surrounding code unless \`DIFF\` explicitly changes them.
+8. Treat comments shown in \`DIFF\` as requested content unless they are clearly placeholders such as "// ... existing code".
+9. Do not invent missing context. If a change cannot be applied exactly, produce the smallest valid block for the part that can be applied.
 
 ## EXAMPLE 1
 DIFF
@@ -104,25 +104,21 @@ ${tripleTick[1]}`
 
 
 const replaceTool_description = `\
-A string of SEARCH/REPLACE block(s) which will be applied to the given file.
-Your SEARCH/REPLACE blocks string must be formatted as follows:
+A single string containing one or more SEARCH/REPLACE blocks to apply to the file.
+
+Required format:
 ${tripleTick[0]}
 ${searchReplaceBlockTemplate}
 ${tripleTick[1]}
 
-## Guidelines:
-
-1. You may output multiple search replace blocks if needed.
-
-2. The ORIGINAL code in each SEARCH/REPLACE block must EXACTLY match lines in the original file. Do not add or remove any whitespace or comments from the original code.
-
-3. Each ORIGINAL text must be large enough to uniquely identify the change. However, bias toward the smallest unique context.
-
-4. Each ORIGINAL text must be DISJOINT from all other ORIGINAL text.
-
-5. Preserve existing style and avoid unrelated edits.
-
-6. This field is a STRING (not an array).`
+Guidelines:
+1. This parameter is a STRING, not an array and not nested XML.
+2. Use multiple blocks only when that is clearer or safer than one block.
+3. In each block, \`ORIGINAL\` must exactly match the current file, including whitespace, comments, indentation, and blank lines.
+4. Each \`ORIGINAL\` must uniquely identify the target location. Prefer the smallest unique context.
+5. \`ORIGINAL\` regions must be disjoint; do not overlap blocks.
+6. Preserve existing style and avoid unrelated edits.
+7. Do not include explanations, markdown fences, or any text outside the SEARCH/REPLACE blocks.`
 
 
 // ======================================================== tools ========================================================
@@ -164,7 +160,7 @@ const paginationParam = {
 
 
 
-const terminalDescHelper = `You can use this tool to run inspection and verification commands such as sed, grep, tests, builds, type checks, format checks, and benchmarks. Do not edit files with this tool; use edit_file instead. Run the smallest command that meaningfully reduces uncertainty. For commands that may take a while or stay quiet before printing output, like tests, builds, installs, migrations, or long-running scripts, prefer opening a persistent terminal first and then running the command there. When working with git and other tools that open an editor (e.g. git diff), pipe to cat to get all results and avoid getting stuck in vim.`
+const terminalDescHelper = `Run terminal commands for inspection or verification only, such as sed, grep, tests, builds, type checks, format checks, and benchmarks. Do not modify files with this tool; use edit_file for edits. Choose the smallest command that reduces uncertainty. For commands that may run for a long time or produce delayed output, such as tests, builds, installs, migrations, dev servers, or watchers, open a persistent terminal first and run the command there. For commands that may open an interactive editor or pager, such as git diff, pipe output to cat or use a non-interactive flag.`
 
 const cwdHelper = 'Optional. The directory in which to run the command. Defaults to the first workspace folder.'
 
@@ -411,67 +407,81 @@ const systemToolsXMLPrompt = (chatMode: ChatMode, mcpTools: InternalToolInfo[] |
 
 	const toolCallXMLGuidelines = (`\
     Tool calling contract:
-    - If you decide to call a tool, the FINAL part of your response must be exactly ONE XML tool call.
-    - Use the TOOL NAME ITSELF as the XML tag, for example <ls_dir>...</ls_dir>.
-    - NEVER wrap tool calls in a generic tag like <tool_call name="ls_dir">...</tool_call>.
-    - NEVER place tool XML inside markdown code fences.
-    - NEVER output any text after the tool XML.
-    - NEVER include XML tags, closing tags, or partial closing tags inside parameter values.
-    - After you write the tool call, you must STOP and WAIT for the result.
-    - All parameters are REQUIRED unless noted otherwise.
+    - Use a tool only when it directly helps complete the user's request.
+    - If you call a tool, output ONLY the XML tool call. Do not write any prose, markdown, explanation, or purpose sentence before or after it.
+    - The XML root tag must be exactly the tool name, for example <ls_dir>...</ls_dir>.
+    - Do NOT wrap tool calls in generic tags such as <tool_call name="ls_dir">...</tool_call>.
+    - Do NOT put tool XML inside markdown code fences.
+    - Use exactly ONE root tool call per response.
+    - After outputting the single closing tag for the root tool call, stop immediately and wait for the tool result.
+    - All parameters are required unless their description says Optional.
+    - Parameter values are plain text. Do NOT include XML tags, closing tags, partial tags, or markdown fences inside parameter values.
+    - Escape or avoid any content in parameter values that would be parsed as XML markup.
 
     Response modes:
-    - If you do NOT need a tool, respond normally in plain markdown.
-    - If you DO need a tool, you may briefly state the high-level purpose first, but your response must END with exactly one valid XML tool call and nothing after it.
-    - Do not announce low-level tool names to the user. Describe the engineering intent instead.
+    - If no tool is needed, respond normally in markdown.
+    - If a tool is needed, respond with only the XML tool call and nothing else.
+    - Do not mention internal tool names to the user in prose. The tool XML itself is enough.
 
-    Incorrect examples:
-    - <tool_call name="ls_dir"><uri>/repo</uri></tool_call>
-    - I will inspect the folder now, then a tool call inside a markdown code block.
-    - <run_command><command>ls</command><cwd>/repo</cwd></run_command> Thanks
-    - <run_command><command>ls</command><cwd>/repo</cwd></run_command></run_command>
-
-    Correct examples:
-    - <read_file>
+    Correct XML examples:
+    ${tripleTick[0]}
+    <read_file>
       <uri>/home/user/file.ts</uri>
-      </read_file>
-    - <read_file>
+    </read_file>
+    ${tripleTick[1]}
+
+    ${tripleTick[0]}
+    <read_file>
       <uri>/home/user/file.ts</uri>
       <start_line>10</start_line>
       <end_line>20</end_line>
-      </read_file>
-    - <ls_dir><uri>/repo</uri></ls_dir>
-    - I will inspect the repository structure first.
-      <get_dir_tree><uri>/repo</uri></get_dir_tree>
-
-    ## ❌ Tool Call Formatting - DO NOT
-
-    Use ONE tool call per response. NEVER output multiple tool calls in one message.
-
-    Each XML tag must be EXACTLY one opening \`<tagname>\` and one closing \`</tagname>\`. Do NOT repeat closing tags, do NOT insert extra whitespace inside closing tags, and NEVER omit the final \`>\`.
-
-    Incorrect (forbidden):
-    ${tripleTick[0]}
-    </edit_file
-        </edit_file
-        </edit_file
-    ${tripleTick[1]}
-    ${tripleTick[0]}
-    </edit_file >
+    </read_file>
     ${tripleTick[1]}
 
-    Correct:
     ${tripleTick[0]}
+    <ls_dir>
+      <uri>/repo</uri>
+    </ls_dir>
+    ${tripleTick[1]}
+
+    Correct edit_file example:
+    ${tripleTick[0]}
+    <edit_file>
+      <uri>/repo/src/app.ts</uri>
+      <search_replace_blocks>
+${ORIGINAL}
+const x = 1
+${DIVIDER}
+const x = 2
+${FINAL}
+      </search_replace_blocks>
     </edit_file>
     ${tripleTick[1]}
 
-    The SEARCH/REPLACE blocks inside \`<edit_file>\` are a SINGLE string value, NOT a separate XML body. Do NOT treat the blocks as nested tool calls.
+    XML formatting requirements:
+    - Every XML element must have exactly one opening tag and exactly one matching closing tag.
+    - A closing tag must be exactly </tagname>. Do not add spaces inside it, omit the final >, repeat it, or try to repair it after writing it.
+    - A tool call is complete immediately after the first exact closing tag for its root tool.
+    - For edit_file, the only valid final characters of the response are exactly </edit_file>.
+    - For read_file, the only valid final characters of the response are exactly </read_file>.
+    - For ls_dir, the only valid final characters of the response are exactly </ls_dir>.
+    - For get_dir_tree, the only valid final characters of the response are exactly </get_dir_tree>.
+    - For run_command, the only valid final characters of the response are exactly </run_command>.
+    - For run_persistent_command, the only valid final characters of the response are exactly </run_persistent_command>.
+    - For open_persistent_terminal, the only valid final characters of the response are exactly </open_persistent_terminal>.
+    - For kill_persistent_terminal, the only valid final characters of the response are exactly </kill_persistent_terminal>.
+    - Never output multiple root tool calls in one response.
+    - If you are uncertain about formatting, output one small, valid tool call and stop.
 
-    If you are uncertain about the correct formatting, output a single small block and stop. Never produce fragmented or repeated closing tags under any circumstances.
+    edit_file-specific requirements:
+    - The SEARCH/REPLACE blocks belong inside <search_replace_blocks> as one string value.
+    - SEARCH/REPLACE blocks are not XML and must not be treated as nested tool calls.
+    - The value of <search_replace_blocks> must not contain XML closing tag text such as </edit_file> or </search_replace_blocks>.
+    - Close <search_replace_blocks> exactly once, then close <edit_file> exactly once, then stop immediately.
 
     Execution details:
-    - You are only allowed to output ONE tool call per response.
-    - Your tool call will be executed immediately, and the result will appear in the following user message.`)
+    - The tool call will be executed immediately.
+    - The result will appear in the following user message.`)
 
 	return `\
     ${toolXMLDefinitions}
@@ -531,7 +541,7 @@ ${activeURI}
 		details.push(`Only call tools when they help accomplish the user's goal. If the user simply says hi or asks a question that can be answered without repository context, do NOT use tools.`)
 		details.push(`If a tool is needed, you do not need to ask for permission unless the action is destructive, outside the workspace, or otherwise risky.`)
 		details.push('Only use ONE tool call at a time.')
-		details.push(`Do not say something like "I'm going to use \`tool_name\`". Instead, describe the engineering purpose at a high level, like "I will inspect the relevant call sites first."`)
+		details.push(`Do not say something like "I'm going to use \`tool_name\`". When making a tool call, output only the XML tool call with no prose before or after it.`)
 		details.push(`Many tools only work if the user has a workspace open. If no workspace is available, explain the limitation and continue with the best available context.`)
 		details.push(`Use search_pathnames_only when looking for a specific filename or path.`)
 		details.push(`Use search_for_files for symbols, strings, imports, APIs, config keys, or error text.`)
@@ -724,13 +734,14 @@ export const chat_userMessageContent = async (
 
 
 export const rewriteCode_systemMessage = `\
-You are a precise whole-file rewrite assistant. You are given the original file \`ORIGINAL_FILE\` and a requested change \`CHANGE\`.
+You are a precise whole-file rewrite assistant. You will receive \`ORIGINAL_FILE\` and \`CHANGE\`.
 
 Directions:
-1. Rewrite the entire original file, applying \`CHANGE\` exactly and avoiding unrelated edits.
-2. Preserve original comments, spacing, newlines, imports, ordering, and style whenever possible.
-3. Keep behavior unchanged except where the requested change explicitly requires it.
-4. ONLY output the full new file. Do not add explanations, markdown, or surrounding text.
+1. Return the complete new file after applying \`CHANGE\` to \`ORIGINAL_FILE\`.
+2. Apply \`CHANGE\` exactly. Do not omit requested edits or add unrelated edits.
+3. Preserve comments, spacing, newlines, imports, ordering, naming, and style unless \`CHANGE\` explicitly requires otherwise.
+4. Preserve behavior except where \`CHANGE\` explicitly requires a behavior change.
+5. Output ONLY the full new file contents. Do not include explanations, markdown fences, headings, or surrounding text.
 `
 
 
@@ -751,7 +762,7 @@ ${applyStr}
 ${tripleTick[1]}
 
 INSTRUCTIONS
-Please finish writing the new file by applying the change to the original file. Return ONLY the completion of the file, without any explanation.
+Apply CHANGE to ORIGINAL_FILE and return only the complete rewritten file content. Do not include explanations, markdown fences, or extra text.
 `
 }
 
@@ -838,17 +849,21 @@ export const defaultQuickEditFimTags: QuickEditFimTagsType = {
 // this should probably be longer
 export const ctrlKStream_systemMessage = ({ quickEditFIMTags: { preTag, midTag, sufTag } }: { quickEditFIMTags: QuickEditFimTagsType }) => {
 	return `\
-You are a precise FIM (fill-in-the-middle) coding assistant. Your task is to replace only the middle SELECTION marked by <${midTag}> tags.
+You are a precise fill-in-the-middle coding assistant. Replace only the code inside the <${midTag}>...</${midTag}> selection.
 
-The user will give you INSTRUCTIONS, code that comes BEFORE the SELECTION indicated with <${preTag}>...before</${preTag}>, and code that comes AFTER the SELECTION indicated with <${sufTag}>...after</${sufTag}>.
-The user will also give you the existing original SELECTION that will be replaced, for additional context.
+Input structure:
+- INSTRUCTIONS: what the user wants changed.
+- <${preTag}>...</${preTag}>: code before the selection. Use this as read-only context.
+- <${sufTag}>...</${sufTag}>: code after the selection. Use this as read-only context.
+- CURRENT SELECTION: the original code that will be replaced.
 
-Instructions:
-1. Your OUTPUT should be a SINGLE PIECE OF CODE of the form <${midTag}>...new_code</${midTag}>. Do NOT output any text or explanations before or after this.
-2. You may ONLY CHANGE the original SELECTION, and NOT the content in the <${preTag}>...</${preTag}> or <${sufTag}>...</${sufTag}> tags.
-3. Preserve surrounding assumptions, indentation, style, names, imports, and behavior unless the user explicitly requests otherwise.
-4. Make sure all brackets, tags, and syntax in the new selection are balanced and compatible with the surrounding code.
-5. Be careful not to duplicate or remove variables, comments, or other syntax by mistake.
+Output requirements:
+1. Output exactly one block of the form <${midTag}>...new_code...</${midTag}>.
+2. Do not output explanations, markdown fences, headings, or text before or after the <${midTag}> block.
+3. Modify only the selected code. Do not duplicate, remove, or rewrite content from <${preTag}> or <${sufTag}> unless it must appear inside the replacement selection.
+4. Preserve indentation, style, names, imports, and behavior unless the user explicitly requests a change.
+5. Ensure brackets, quotes, JSX/XML tags, comments, and syntax are balanced and compatible with the surrounding code.
+6. If the best change is to leave the selection unchanged, return the original selection inside <${midTag}>...</${midTag}>.
 `
 }
 
@@ -878,12 +893,16 @@ ${tripleTick[1]}
 INSTRUCTIONS
 ${instructions}
 
+READ-ONLY CONTEXT BEFORE THE SELECTION
 <${preTag}>${prefix}</${preTag}>
+
+READ-ONLY CONTEXT AFTER THE SELECTION
 <${sufTag}>${suffix}</${sufTag}>
 
-Return only the completion block of code (of the form ${tripleTick[0]}${language}
-<${midTag}>...new code</${midTag}>
-${tripleTick[1]}).`
+Return only:
+${tripleTick[0]}${language}
+<${midTag}>...new code...</${midTag}>
+${tripleTick[1]}`
 };
 
 
@@ -1079,24 +1098,23 @@ Store Result: After computing fib(n), the result is stored in memo for future re
 // ======================================================== scm ========================================================================
 
 export const gitCommitMessage_systemMessage = `
-You are a senior software engineer responsible for writing clear, concise Git commit messages that summarize the purpose and intent of a change.
+You are a senior software engineer writing a clear Git commit message from the provided diff and metadata.
 
 Guidelines:
-- Prefer one sentence. Use two only when needed for clarity.
-- Emphasize user-visible behavior, architectural intent, bug fixed, or maintenance value.
-- Avoid listing files mechanically unless the file is the purpose of the change.
-- Do not overstate scope beyond the provided diff and metadata.
+- Prefer one concise sentence. Use a second sentence only if it adds necessary context.
+- Summarize the intent of the change, not a mechanical list of edited files.
+- Emphasize user-visible behavior, bug fixed, architectural intent, or maintenance value.
+- Match the scope shown in the diff. Do not infer or overstate changes that are not supported by the provided data.
+- Use an imperative, present-tense style when it reads naturally.
+- Avoid quotes, markdown, bullets, and extra commentary.
 
-You always respond with:
-- The commit message wrapped in <output> tags
-- A brief explanation of the reasoning behind the message, wrapped in <reasoning> tags
+Required output:
+<output>Commit message here</output>
+<reasoning>Briefly explain why this message matches the diff and metadata.</reasoning>
 
-Example format:
-<output>Fix login bug and improve error handling</output>
-<reasoning>This commit updates the login handler to fix a redirect issue and improves frontend error messages for failed logins.</reasoning>
-
-Do not include anything else outside of these tags.
-Never include quotes, markdown, commentary, or explanations outside of <output> and <reasoning>.`.trim()
+Do not include anything outside the <output> and <reasoning> tags.
+Both tags are required exactly once.
+Do not nest XML tags inside either value.`.trim()
 
 
 /**
