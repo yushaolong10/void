@@ -5,12 +5,14 @@ import { createDecorator } from '../../../../platform/instantiation/common/insta
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
+import { Schemas } from '../../../../base/common/network.js';
 import { ChatMessage } from '../common/chatThreadServiceTypes.js';
 import { getIsReasoningEnabledState, getReservedOutputTokenSpace, getModelCapabilities } from '../common/modelCapabilities.js';
-import { reParsedToolXMLString, chat_systemMessage } from '../common/prompt/prompts.js';
-import { AnthropicLLMChatMessage, AnthropicReasoning, GeminiLLMChatMessage, LLMChatMessage, LLMFIMMessage, OpenAILLMChatMessage, RawToolParamsObj } from '../common/sendLLMMessageTypes.js';
+import { reParsedToolXMLString, chat_systemMessage, CHAT_HISTORY_COMPRESSION, compressHistoryPrompt } from '../common/prompt/prompts.js';
+import { AnthropicLLMChatMessage, AnthropicReasoning, GeminiLLMChatMessage, LLMChatMessage, LLMFIMMessage, OpenAILLMChatMessage, RawToolParamsObj, ServiceSendLLMMessageParams } from '../common/sendLLMMessageTypes.js';
 import { IVoidSettingsService } from '../common/voidSettingsService.js';
 import { ChatMode, FeatureName, ModelSelection, ProviderName } from '../common/voidSettingsTypes.js';
+import { ILLMMessageService } from '../common/sendLLMMessageService.js';
 import { IDirectoryStrService } from '../common/directoryStrService.js';
 import { ITerminalToolService } from './terminalToolService.js';
 import { IVoidModelService } from '../common/voidModelService.js';
@@ -20,6 +22,12 @@ import { ToolName } from '../common/toolsServiceTypes.js';
 import { IMCPService } from '../common/mcpService.js';
 
 export const EMPTY_MESSAGE = '(empty message)'
+
+const OPEN_FILE_SCHEMES = new Set([
+	Schemas.file,
+	Schemas.vscodeRemote,
+	Schemas.vscodeUserData,
+])
 
 
 
@@ -525,7 +533,7 @@ export interface IConvertToLLMMessageService {
 	readonly _serviceBrand: undefined;
 	prepareAgentRunPromptContext: (opts: { chatMode: ChatMode, modelSelection: ModelSelection | null }) => Promise<{ systemMessage: string, aiInstructions: string }>
 	prepareLLMSimpleMessages: (opts: { simpleMessages: SimpleLLMMessage[], systemMessage: string, modelSelection: ModelSelection | null, featureName: FeatureName }) => { messages: LLMChatMessage[], separateSystemMessage: string | undefined }
-	prepareLLMChatMessages: (opts: { chatMessages: ChatMessage[], chatMode: ChatMode, modelSelection: ModelSelection | null, promptContextOverride?: { systemMessage: string, aiInstructions: string } }) => Promise<{ messages: LLMChatMessage[], separateSystemMessage: string | undefined }>
+	prepareLLMChatMessages: (opts: { chatMessages: ChatMessage[], chatMode: ChatMode, modelSelection: ModelSelection | null, promptContextOverride?: { systemMessage: string, aiInstructions: string }, threadId: string }) => Promise<{ messages: LLMChatMessage[], separateSystemMessage: string | undefined }>
 	prepareFIMMessage(opts: { messages: LLMFIMMessage, }): { prefix: string, suffix: string, stopTokens: string[] }
 }
 
@@ -566,6 +574,14 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 		value: string;
 	} | null = null;
 
+	// History compression state, keyed by threadId.
+	// `summarizedRoundCount` is the number of rounds that have been compressed into summaries.
+	// `summaryList` is the array of per-chunk compressed summaries, in order (oldest first).
+	private _summaryBySession = new Map<string, {
+		summarizedRoundCount: number;
+		summaryList: string[];
+	}>();
+
 	constructor(
 		@IModelService private readonly modelService: IModelService,
 		@IWorkspaceContextService private readonly workspaceContextService: IWorkspaceContextService,
@@ -576,6 +592,7 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 		@IVoidSettingsService private readonly voidSettingsService: IVoidSettingsService,
 		@IVoidModelService private readonly voidModelService: IVoidModelService,
 		@IMCPService private readonly mcpService: IMCPService,
+		@ILLMMessageService private readonly _llmMessageService: ILLMMessageService,
 	) {
 		super()
 	}
@@ -704,7 +721,13 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 	private _generateChatMessagesSystemMessage = async (chatMode: ChatMode, specialToolFormat: 'openai-style' | 'anthropic-style' | 'gemini-style' | undefined) => {
 		const workspaceFolders = this.workspaceContextService.getWorkspace().folders.map(f => f.uri.fsPath)
 
-		const openedURIs = this.modelService.getModels().filter(m => m.isAttachedToEditor()).map(m => m.uri.fsPath) || [];
+		const openedURIs = [...new Set(
+			this.modelService.getModels()
+				.filter(m => m.isAttachedToEditor())
+				.map(m => m.uri)
+				.filter(uri => OPEN_FILE_SCHEMES.has(uri.scheme))
+				.map(uri => uri.fsPath)
+		)];
 		const activeURI = this.editorService.activeEditor?.resource?.fsPath;
 
 		const directoryStr = await this._getDirectoryStrCached(chatMode)
@@ -741,9 +764,176 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 
 
 
+	// ================ History compression ================
+
+	// Split SimpleLLMMessage[] into rounds. Each round starts with a `user` message
+	// and includes all subsequent non-user messages until the next `user` (exclusive).
+	private _splitIntoRounds(messages: SimpleLLMMessage[]): SimpleLLMMessage[][] {
+		const rounds: SimpleLLMMessage[][] = []
+		let currentRound: SimpleLLMMessage[] | null = null
+		for (const m of messages) {
+			if (m.role === 'user') {
+				if (currentRound) rounds.push(currentRound)
+				currentRound = [m]
+			} else if (currentRound) {
+				currentRound.push(m)
+			}
+			// If the first message is not a user message (edge case), skip it
+		}
+		if (currentRound) rounds.push(currentRound)
+		return rounds
+	}
+
+	// Build a prompt from a single round for compression.
+	// Returns a compact string representation.
+	private _roundToCompressionPrompt(round: SimpleLLMMessage[]): string {
+		const parts: string[] = []
+		for (const m of round) {
+			if (m.role === 'user') {
+				parts.push(`User: ${m.content}`)
+			} else if (m.role === 'assistant') {
+				parts.push(`Assistant: ${m.content}`)
+			} else if (m.role === 'tool') {
+				const resultLen = m.content?.length ?? 0
+				parts.push(`Tool[${m.name}]: (${resultLen} chars result)`)
+			}
+		}
+		return parts.join('\n')
+	}
+
+	// Synchronously compress a list of rounds using LLM (or fallback to rule-based summary).
+	// Returns a single compact summary string for all the given rounds.
+	private async _llmCompress(rounds: SimpleLLMMessage[][], modelSelection: ModelSelection): Promise<string> {
+		const dialogStr = rounds.map(r => this._roundToCompressionPrompt(r)).join('\n\n---\n\n')
+
+		const prompt = `${compressHistoryPrompt}\n\n${dialogStr}\n\nSummary:`
+
+		const modelSelectionOptions = this.voidSettingsService.state.optionsOfModelSelection['Chat'][modelSelection.providerName]?.[modelSelection.modelName]
+
+		try {
+			// Use sendLLMMessage with the user's chat model for compression.
+			// We construct a minimal single-turn chat completion request.
+			const res = await new Promise<string>((resolve, reject) => {
+				const requestId = this._llmMessageService.sendLLMMessage({
+					messagesType: 'chatMessages',
+					chatMode: 'agent',
+					messages: [
+						{ role: 'user', content: prompt }
+					],
+					modelSelection: modelSelection,
+					modelSelectionOptions: modelSelectionOptions,
+					overridesOfModel: this.voidSettingsService.state?.overridesOfModel,
+					logging: { loggingName: 'History Compression' },
+					separateSystemMessage: undefined,
+					onText: () => { /* no-op, we only care about final */ },
+					onFinalMessage: async ({ fullText }) => {
+						resolve(fullText)
+					},
+					onError: async (error) => {
+						reject(error)
+					},
+					onAbort: () => {
+						reject(new Error('Compression was aborted'))
+					},
+				} as ServiceSendLLMMessageParams)
+
+				if (!requestId) {
+					reject(new Error('Could not start compression request'))
+					return
+				}
+			})
+			return res.trim() || '[compression produced empty result]'
+		} catch (e) {
+			// Fallback: rule-based summary
+			const fallbackParts = rounds.map((r, ri) => {
+				const userMsg = r.find(m => m.role === 'user')
+				const assistantMsg = r.find(m => m.role === 'assistant')
+				const toolMsgs = r.filter(m => m.role === 'tool')
+				const userPreview = userMsg ? userMsg.content.substring(0, 80).replace(/\n/g, ' ') : ''
+				const assistantPreview = assistantMsg ? assistantMsg.content.substring(0, 120).replace(/\n/g, ' ') : ''
+				const toolInfo = toolMsgs.length > 0 ? `[${toolMsgs.map(t => t.name).join(', ')}]` : ''
+				return `Round ${ri + 1}: User: "${userPreview}" | Assistant: "${assistantPreview}" ${toolInfo}`
+			})
+			return fallbackParts.join('\n')
+		}
+	}
+
+	// Get or create compressed summaries for a thread.
+	// Returns the summary string to prepend to system message, and the filtered messages.
+	// The number of full rounds to keep is CHAT_HISTORY_COMPRESSION.maxFullRounds.
+	private async _getOrCreateCompressedSummaries(
+		threadId: string,
+		messages: SimpleLLMMessage[],
+		modelSelection: ModelSelection,
+	): Promise<{
+		summaryStr: string; // the full summary string (multiple blocks concatenated), or empty if no compression needed
+		filteredMessages: SimpleLLMMessage[]; // messages after removing summarized rounds
+	}> {
+		const rounds = this._splitIntoRounds(messages)
+		const { maxFullRounds, roundsPerSummaryChunk, maxSummaryChars } = CHAT_HISTORY_COMPRESSION
+
+		// Freeze-mode compression:
+		// - Always keep the latest `maxFullRounds` rounds verbatim.
+		// - Only create a new summary when the older, unsummarized portion has grown
+		//   by a full `roundsPerSummaryChunk`.
+		// - Existing summaries are never recomputed.
+		const targetSummarizedRoundCount = Math.max(
+			0,
+			Math.floor((rounds.length - maxFullRounds) / roundsPerSummaryChunk) * roundsPerSummaryChunk
+		)
+
+		const existingData = this._summaryBySession.get(threadId)
+		let summarizedRoundCount = existingData?.summarizedRoundCount ?? 0
+		let summaryList = existingData?.summaryList.slice() ?? []
+
+		// If the thread history shrank, drop trailing summaries instead of recomputing.
+		if (targetSummarizedRoundCount < summarizedRoundCount) {
+			summarizedRoundCount = targetSummarizedRoundCount
+			summaryList = summaryList.slice(0, summarizedRoundCount / roundsPerSummaryChunk)
+		}
+
+		// Only append brand-new frozen chunks.
+		if (targetSummarizedRoundCount > summarizedRoundCount) {
+			for (let start = summarizedRoundCount; start < targetSummarizedRoundCount; start += roundsPerSummaryChunk) {
+				const chunk = rounds.slice(start, start + roundsPerSummaryChunk)
+				const compressed = await this._llmCompress(chunk, modelSelection)
+				summaryList.push(compressed)
+			}
+			summarizedRoundCount = targetSummarizedRoundCount
+		}
+
+		this._summaryBySession.set(threadId, {
+			summarizedRoundCount,
+			summaryList,
+		})
+
+		if (summarizedRoundCount === 0) {
+			return { summaryStr: '', filteredMessages: messages }
+		}
+
+		const fullRounds = rounds.slice(summarizedRoundCount)
+
+		// Build the summary string
+		let summaryStr = ''
+		if (summaryList.length > 0) {
+			summaryStr = summaryList.map((s, i) => `\`\`\`\nSummary ${i + 1}:\n${s}\n\`\`\``).join('\n\n')
+			// Trim if exceeds maxSummaryChars (trim from the beginning to preserve latest summaries)
+			if (summaryStr.length > maxSummaryChars) {
+				const trimmed = summaryStr.slice(-maxSummaryChars)
+				summaryStr = `...(earlier summaries truncated)\n${trimmed}`
+			}
+		}
+
+		// The filtered messages = only the full rounds
+		const filteredMessages = fullRounds.flat()
+
+		return { summaryStr, filteredMessages }
+	}
+
 	// --- LLM Chat messages ---
 
 	private _chatMessagesToSimpleMessages(chatMessages: ChatMessage[]): SimpleLLMMessage[] {
+
 		const simpleLLMMessages: SimpleLLMMessage[] = []
 
 		for (const m of chatMessages) {
@@ -833,7 +1023,7 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 
 		return { systemMessage, aiInstructions }
 	}
-	prepareLLMChatMessages: IConvertToLLMMessageService['prepareLLMChatMessages'] = async ({ chatMessages, chatMode, modelSelection, promptContextOverride }) => {
+	prepareLLMChatMessages: IConvertToLLMMessageService['prepareLLMChatMessages'] = async ({ chatMessages, chatMode, modelSelection, promptContextOverride, threadId }) => {
 		if (modelSelection === null) return { messages: [], separateSystemMessage: undefined }
 
 		const { overridesOfModel } = this.voidSettingsService.state
@@ -855,9 +1045,33 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 		const reservedOutputTokenSpace = getReservedOutputTokenSpace(providerName, modelName, { isReasoningEnabled, overridesOfModel })
 		const llmMessages = this._chatMessagesToSimpleMessages(chatMessages)
 
+		// Apply history compression if needed
+		let effectiveSystemMessage = systemMessage
+		let effectiveMessages = llmMessages
+
+		if (threadId) {
+			const { summaryStr, filteredMessages } = await this._getOrCreateCompressedSummaries(threadId, llmMessages, modelSelection)
+			if (summaryStr) {
+				effectiveSystemMessage = systemMessage + '\n\n--- Earlier Conversation History ---\n' + summaryStr
+				effectiveMessages = filteredMessages
+			}
+		}
+
+		// On-the-fly token-level compression (safety net)
+		if (effectiveMessages.length > 0) {
+			// Keep only the last `maxFullRounds * N` messages for safety
+			const userCount = effectiveMessages.filter(m => m.role === 'user').length
+			if (userCount > CHAT_HISTORY_COMPRESSION.maxFullRounds * 3) {
+				// Extreme edge case: even after summary, too many user messages.
+				// Trim to the last few round groups even after summary, as a final safety net.
+				const rounds = this._splitIntoRounds(effectiveMessages)
+				effectiveMessages = rounds.slice(-CHAT_HISTORY_COMPRESSION.maxFullRounds * CHAT_HISTORY_COMPRESSION.roundsPerSummaryChunk).flat()
+			}
+		}
+
 		const { messages, separateSystemMessage } = prepareMessages({
-			messages: llmMessages,
-			systemMessage,
+			messages: effectiveMessages,
+			systemMessage: effectiveSystemMessage,
 			aiInstructions,
 			supportsSystemMessage,
 			specialToolFormat,

@@ -355,11 +355,15 @@ export class TerminalToolService extends Disposable implements ITerminalToolServ
 					resetTimer();
 				})
 
-			// send the command now that listeners and timeout mechanisms are attached
-			await terminal.sendText(command, true)
+			// Start sending the command only after listeners and timeout mechanisms are attached.
+			// Important: do not await sendText directly here. In some cases _processManager.write()
+			// can stall, and awaiting it would prevent the timeout path from ever resolving.
+			// Instead, only surface sendText failures; successful dispatch stays in the background.
+			const waitForCompletion = Promise.any([waitUntilDone, waitUntilInterrupt]);
+			const sendTextFailure = terminal.sendText(command, true)
+				.then(() => new Promise<never>(() => { }))
 
-			// wait for result
-			await Promise.any([waitUntilDone, waitUntilInterrupt])
+			await Promise.race([waitForCompletion, sendTextFailure])
 				.finally(() => disposables.forEach(d => d.dispose()))
 
 

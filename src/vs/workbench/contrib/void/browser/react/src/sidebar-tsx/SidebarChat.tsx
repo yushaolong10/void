@@ -18,10 +18,11 @@ import { ModelDropdown, } from '../void-settings-tsx/ModelDropdown.js';
 import { PastThreadsList } from './SidebarThreadSelector.js';
 import { VOID_CTRL_L_ACTION_ID } from '../../../actionIDs.js';
 import { VOID_OPEN_SETTINGS_ACTION_ID } from '../../../voidSettingsPane.js';
-import { ChatMode, displayInfoOfProviderName, FeatureName, isFeatureNameDisabled } from '../../../../../../../workbench/contrib/void/common/voidSettingsTypes.js';
-import { ICommandService } from '../../../../../../../platform/commands/common/commands.js';
-import { WarningBox } from '../void-settings-tsx/WarningBox.js';
-import { getModelCapabilities, getIsReasoningEnabledState } from '../../../../common/modelCapabilities.js';
+	import { ChatMode, displayInfoOfProviderName, FeatureName, isFeatureNameDisabled } from '../../../../../../../workbench/contrib/void/common/voidSettingsTypes.js';
+	import { ICommandService } from '../../../../../../../platform/commands/common/commands.js';
+	import { WarningBox } from '../void-settings-tsx/WarningBox.js';
+	import { getModelCapabilities, getIsReasoningEnabledState } from '../../../../common/modelCapabilities.js';
+	import { COMPRESSING_HISTORY_LABEL } from '../../../../common/prompt/prompts.js';
 import { AlertTriangle, File, Ban, Check, ChevronRight, Dot, FileIcon, Pencil, Undo, Undo2, X, Flag, Copy as CopyIcon, Info, CirclePlus, Ellipsis, CircleEllipsis, Folder, ALargeSmall, TypeOutline, Text } from 'lucide-react';
 import { ChatMessage, CheckpointEntry, StagingSelectionItem, ToolMessage } from '../../../../common/chatThreadServiceTypes.js';
 import { approvalTypeOfBuiltinToolName, BuiltinToolCallParams, BuiltinToolName, ToolName, LintErrorItem, ToolApprovalType, toolApprovalTypes } from '../../../../common/toolsServiceTypes.js';
@@ -2977,13 +2978,14 @@ export const SidebarChat = () => {
 	}, [previousMessages, threadId, currCheckpointIdx, isRunning])
 
 	const streamingChatIdx = previousMessagesHTML.length
-	const currStreamingMessageHTML = reasoningSoFar || displayContentSoFar || isRunning ?
+	const compressingDisplayContent = isRunning === 'compressing' ? COMPRESSING_HISTORY_LABEL : ''
+	const currStreamingMessageHTML = reasoningSoFar || displayContentSoFar || compressingDisplayContent || isRunning ?
 		<ChatBubble
 			key={'curr-streaming-msg'}
 			currCheckpointIdx={currCheckpointIdx}
 			chatMessage={{
 				role: 'assistant',
-				displayContent: displayContentSoFar ?? '',
+				displayContent: displayContentSoFar ?? compressingDisplayContent,
 				reasoning: reasoningSoFar ?? '',
 				anthropicReasoning: null,
 			}}
@@ -3014,7 +3016,7 @@ export const SidebarChat = () => {
 			w-full h-full
 			overflow-x-hidden
 			overflow-y-auto
-			${previousMessagesHTML.length === 0 && !displayContentSoFar ? 'hidden' : ''}
+			${previousMessagesHTML.length === 0 && !displayContentSoFar && !compressingDisplayContent ? 'hidden' : ''}
 		`}
 	>
 		{/* previous messages */}
@@ -3024,11 +3026,10 @@ export const SidebarChat = () => {
 		{/* Generating tool */}
 		{generatingTool}
 
-		{/* loading indicator */}
+    {/* loading indicator */}
 		{isRunning === 'LLM' || isRunning === 'idle' && !toolIsGenerating ? <ProseWrapper>
 			{<IconLoading className='opacity-50 text-sm' />}
 		</ProseWrapper> : null}
-
 
 		{/* error message */}
 		{latestError === undefined ? null :

@@ -207,13 +207,15 @@ const PastThreadElement = ({ pastThread, idx, hoveredIdx, setHoveredIdx }: {
 	}
 
 	const numMessages = pastThread.messages.filter((msg) => msg.role === 'assistant' || msg.role === 'user').length;
+	const numRounds = pastThread.messages.filter((msg) => msg.role === 'user').length;
+	const statsLabel = `${numRounds}/${numMessages}`;
 
 	const detailsHTML = <span
 	// data-tooltip-id='void-tooltip'
 	// data-tooltip-content={`Last modified ${formatTime(new Date(pastThread.lastModified))}`}
 	// data-tooltip-place='top'
 	>
-		<span className='opacity-60'>{numMessages}</span>
+		<span className='opacity-60'>{statsLabel}</span>
 		{` `}
 		{formatDate(new Date(pastThread.lastModified))}
 		{/* {` messages `} */}
@@ -233,7 +235,7 @@ const PastThreadElement = ({ pastThread, idx, hoveredIdx, setHoveredIdx }: {
 		<div className="flex items-center justify-between gap-1">
 			<span className="flex items-center gap-2 min-w-0 overflow-hidden">
 				{/* spinner */}
-				{isRunning === 'LLM' || isRunning === 'tool' || isRunning === 'idle' ? <LoaderCircle className="animate-spin bg-void-stroke-1 flex-shrink-0 flex-grow-0" size={14} />
+		{isRunning === 'LLM' || isRunning === 'tool' || isRunning === 'idle' || isRunning === 'compressing' ? <LoaderCircle className="animate-spin bg-void-stroke-1 flex-shrink-0 flex-grow-0" size={14} />
 					:
 					isRunning === 'awaiting_user' ? <MessageCircleQuestion className="bg-void-stroke-1 flex-shrink-0 flex-grow-0" size={14} />
 						:
@@ -241,7 +243,7 @@ const PastThreadElement = ({ pastThread, idx, hoveredIdx, setHoveredIdx }: {
 				{/* name */}
 				<span className="truncate overflow-hidden text-ellipsis"
 					data-tooltip-id='void-tooltip'
-					data-tooltip-content={numMessages + ' messages'}
+					data-tooltip-content={`${numRounds} rounds / ${numMessages} messages`}
 					data-tooltip-place='top'
 				>{firstMsg}</span>
 

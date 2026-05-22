@@ -615,6 +615,16 @@ ${details.map((d, i) => `${i + 1}. ${d}`).join('\n\n')}`)
 // 		chat_systemMessage({ chatMode, workspaceFolders: [], openedURIs: [], activeURI: 'pee', persistentTerminalIDs: [], directoryStr: 'lol', }))
 // }
 
+export const CHAT_HISTORY_COMPRESSION = {
+	maxFullRounds: 3,
+	roundsPerSummaryChunk: 3,
+	maxSummaryChars: 5000,
+} as const
+
+export const COMPRESSING_HISTORY_LABEL = 'Compressing earlier history...'
+
+export const compressHistoryPrompt = `You are a conversation compression assistant. Summarize the following chat history into a compact, information-dense paragraph. Focus on: key user requests, actions taken by the assistant (file reads, edits, command results), decisions made, and important findings. Preserve file paths and function names when they are critical. Keep the original language of the conversation. Output ONLY the summary, no explanations, no formatting.`
+
 export const DEFAULT_FILE_SIZE_LIMIT = 2_000_000
 
 export const readFile = async (fileService: IFileService, uri: URI, fileSizeLimit: number): Promise<{

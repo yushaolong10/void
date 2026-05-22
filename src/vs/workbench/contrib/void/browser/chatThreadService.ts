@@ -11,7 +11,7 @@ import { IStorageService, StorageScope, StorageTarget } from '../../../../platfo
 import { URI } from '../../../../base/common/uri.js';
 import { Emitter, Event } from '../../../../base/common/event.js';
 import { ILLMMessageService } from '../common/sendLLMMessageService.js';
-import { chat_userMessageContent, isABuiltinToolName } from '../common/prompt/prompts.js';
+import { CHAT_HISTORY_COMPRESSION, chat_userMessageContent, isABuiltinToolName } from '../common/prompt/prompts.js';
 import { AnthropicReasoning, getErrorMessage, RawToolCallObj, RawToolParamsObj } from '../common/sendLLMMessageTypes.js';
 import { generateUuid } from '../../../../base/common/uuid.js';
 import { FeatureName, ModelSelection, ModelSelectionOptions } from '../common/voidSettingsTypes.js';
@@ -191,6 +191,12 @@ export type ThreadStreamState = {
 			mcpServerName: string | undefined;
 		};
 		interrupt: Promise<() => void>;
+	} | {
+		isRunning: 'compressing';
+		error?: undefined;
+		llmInfo?: undefined;
+		toolInfo?: undefined;
+		interrupt?: undefined;
 	} | {
 		isRunning: 'awaiting_user';
 		error?: undefined;
@@ -420,6 +426,8 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 	}, 500));
 
 	private _latestThreads: ChatThreads | null = null;
+	private _compressionAborted = false;
+
 	private readonly _pendingLLMStreamState = new Map<string, {
 		llmInfo: NonNullable<Extract<ThreadStreamState[string], { isRunning: 'LLM' }>['llmInfo']>;
 		interrupt: Promise<() => void>;
@@ -646,6 +654,12 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 		else if (this.streamState[threadId]?.isRunning === 'idle') {
 			// do nothing
 		}
+		else if (this.streamState[threadId]?.isRunning === 'compressing') {
+			// Compression is non-interruptible at the LLM level, but we need to
+			// abort as soon as the compressed message exchange completes.
+			// Set a flag so _runChatAgent can detect this.
+			this._compressionAborted = true
+		}
 
 		this._addUserCheckpoint({ threadId })
 
@@ -854,15 +868,49 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 			isRunningWhenEnd = undefined
 			nMessagesSent += 1
 
-			this._setStreamState(threadId, { isRunning: 'idle', interrupt: idleInterruptor })
+		this._setStreamState(threadId, { isRunning: 'idle', interrupt: idleInterruptor })
+
+			// Reset compression abort flag — a stale abort from a previous iteration
+			// should not abort the current one.
+			this._compressionAborted = false
 
 			const chatMessages = this.state.allThreads[threadId]?.messages ?? []
+
+			// Check if we need history compression (enough rounds to freeze at least one chunk)
+			let compressionNeeded = false
+			if (chatMode === 'agent') {
+				let userCount = 0
+				for (const m of chatMessages) {
+					if (m.role === 'user') userCount++
+				}
+				compressionNeeded = userCount >= CHAT_HISTORY_COMPRESSION.maxFullRounds + CHAT_HISTORY_COMPRESSION.roundsPerSummaryChunk
+			}
+
+			if (compressionNeeded) {
+				this._setStreamState(threadId, { isRunning: 'compressing' })
+			}
+
 			const { messages, separateSystemMessage } = await this._convertToLLMMessagesService.prepareLLMChatMessages({
 				chatMessages,
 				modelSelection,
 				chatMode,
 				promptContextOverride: promptContext,
+				threadId,
 			})
+
+			// Check if compression was aborted by the user during the call
+			if (this._compressionAborted) {
+				this._compressionAborted = false
+				this._setStreamState(threadId, undefined)
+				this._addUserCheckpoint({ threadId })
+				return
+			}
+
+			// Restore idle state after compression (if it was compressing)
+			const curState = this.streamState[threadId]
+			if (curState?.isRunning === 'compressing' || curState?.isRunning === 'idle') {
+				this._setStreamState(threadId, { isRunning: 'idle', interrupt: idleInterruptor })
+			}
 
 			if (interruptedWhenIdle) {
 				this._setStreamState(threadId, undefined)

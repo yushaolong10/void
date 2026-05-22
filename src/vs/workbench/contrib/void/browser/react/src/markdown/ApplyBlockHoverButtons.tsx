@@ -486,7 +486,7 @@ export const EditToolAcceptRejectButtonsHTML = ({
 	}
 
 	if (streamState === 'idle-has-changes') {
-		if (isRunning === 'LLM' || isRunning === 'tool') return null
+		if (isRunning === 'LLM' || isRunning === 'tool' || isRunning === 'compressing') return null
 
 		return <>
 			<IconShell1
