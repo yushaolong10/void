@@ -9,6 +9,7 @@ export type TerminalResolveReason =
 	{ type: 'idle_timeout' }
 	| { type: 'total_timeout' }
 	| { type: 'done', exitCode: number }
+	| { type: 'aborted' }
 
 export type LintErrorItem = { code: string, message: string, startLineNumber: number, endLineNumber: number }
 

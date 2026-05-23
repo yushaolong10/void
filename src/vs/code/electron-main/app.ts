@@ -132,6 +132,8 @@ import { VoidMainUpdateService } from '../../workbench/contrib/void/electron-mai
 import { LLMMessageChannel } from '../../workbench/contrib/void/electron-main/sendLLMMessageChannel.js';
 import { VoidSCMService } from '../../workbench/contrib/void/electron-main/voidSCMMainService.js';
 import { IVoidSCMService } from '../../workbench/contrib/void/common/voidSCMTypes.js';
+import { VoidSpawnCommandService } from '../../workbench/contrib/void/electron-main/voidSpawnCommandMainService.js';
+import { IVoidSpawnCommandService } from '../../workbench/contrib/void/common/voidSpawnCommandTypes.js';
 import { MCPChannel } from '../../workbench/contrib/void/electron-main/mcpChannel.js';
 /**
  * The main VS Code application. There will only ever be one instance,
@@ -1105,6 +1107,7 @@ export class CodeApplication extends Disposable {
 		services.set(IMetricsService, new SyncDescriptor(MetricsMainService, undefined, false));
 		services.set(IVoidUpdateService, new SyncDescriptor(VoidMainUpdateService, undefined, false));
 		services.set(IVoidSCMService, new SyncDescriptor(VoidSCMService, undefined, false));
+		services.set(IVoidSpawnCommandService, new SyncDescriptor(VoidSpawnCommandService, undefined, false));
 
 		// Default Extensions Profile Init
 		services.set(IExtensionsProfileScannerService, new SyncDescriptor(ExtensionsProfileScannerService, undefined, true));
@@ -1249,6 +1252,10 @@ export class CodeApplication extends Disposable {
 		// Void added this
 		const voidSCMChannel = ProxyChannel.fromService(accessor.get(IVoidSCMService), disposables);
 		mainProcessElectronServer.registerChannel('void-channel-scm', voidSCMChannel);
+
+		// Void added this
+		const voidSpawnCommandChannel = ProxyChannel.fromService(accessor.get(IVoidSpawnCommandService), disposables);
+		mainProcessElectronServer.registerChannel('void-channel-spawnCommand', voidSpawnCommandChannel);
 
 		// Void added this
 		const mcpChannel = new MCPChannel();

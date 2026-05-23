@@ -320,7 +320,7 @@ export class TerminalProcess extends Disposable implements ITerminalChildProcess
 			}
 
 			// Refire the data event
-			this._logService.trace('node-pty.IPty#onData', data);
+			this._logService.trace('node-pty.IPty#onData', data.length);
 			this._onProcessData.fire(data);
 			if (this._closeTimeout) {
 				this._queueProcessExit();

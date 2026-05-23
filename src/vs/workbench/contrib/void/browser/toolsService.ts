@@ -565,6 +565,9 @@ export class ToolsService implements IToolsService {
 				if (resolveReason.type === 'total_timeout') {
 					return `${result_}\nTerminal command ran for ${MAX_TERMINAL_TOTAL_TIME}s and did not finish successfully in the temporary terminal. For longer-running commands, open a persistent terminal and run the command there.`
 				}
+				if (resolveReason.type === 'aborted') {
+					return `${result_}\nCommand was aborted before completion.`
+				}
 				throw new Error(`Unexpected internal error: Terminal command did not resolve with a valid reason.`)
 			},
 

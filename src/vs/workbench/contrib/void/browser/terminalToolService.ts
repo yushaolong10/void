@@ -3,7 +3,7 @@
  *  Licensed under the Apache License, Version 2.0. See LICENSE.txt for more information.
  *--------------------------------------------------------------------------------------*/
 
-import { Disposable, IDisposable, toDisposable } from '../../../../base/common/lifecycle.js';
+import { Disposable, IDisposable } from '../../../../base/common/lifecycle.js';
 import { removeAnsiEscapeCodes } from '../../../../base/common/strings.js';
 import { ITerminalCapabilityImplMap, TerminalCapability } from '../../../../platform/terminal/common/capabilities/capabilities.js';
 import { URI } from '../../../../base/common/uri.js';
@@ -15,6 +15,10 @@ import { ITerminalService, ITerminalInstance, ICreateTerminalOptions } from '../
 import { MAX_TERMINAL_BG_COMMAND_TIME, MAX_TERMINAL_CHARS, MAX_TERMINAL_INACTIVE_TIME, MAX_TERMINAL_TOTAL_TIME } from '../common/prompt/prompts.js';
 import { TerminalResolveReason } from '../common/toolsServiceTypes.js';
 import { timeout } from '../../../../base/common/async.js';
+import { ProxyChannel } from '../../../../base/parts/ipc/common/ipc.js';
+import { IMainProcessService } from '../../../../platform/ipc/common/mainProcessService.js';
+import { IVoidSpawnCommandService } from '../common/voidSpawnCommandTypes.js';
+import { generateUuid } from '../../../../base/common/uuid.js';
 
 
 
@@ -70,10 +74,21 @@ export class TerminalToolService extends Disposable implements ITerminalToolServ
 
 	private persistentTerminalInstanceOfId: Record<string, ITerminalInstance> = {}
 	private temporaryTerminalInstanceOfId: Record<string, ITerminalInstance> = {}
+	private _spawnCommandService: IVoidSpawnCommandService | undefined = undefined;
+
+	private get spawnCommandService(): IVoidSpawnCommandService {
+		if (!this._spawnCommandService) {
+			this._spawnCommandService = ProxyChannel.toService<IVoidSpawnCommandService>(
+				this.mainProcessService.getChannel('void-channel-spawnCommand')
+			);
+		}
+		return this._spawnCommandService;
+	}
 
 	constructor(
 		@ITerminalService private readonly terminalService: ITerminalService,
 		@IWorkspaceContextService private readonly workspaceContextService: IWorkspaceContextService,
+		@IMainProcessService private readonly mainProcessService: IMainProcessService,
 	) {
 		super();
 
@@ -221,20 +236,50 @@ export class TerminalToolService extends Disposable implements ITerminalToolServ
 			throw new Error('Read Terminal: The requested terminal has not yet been rendered and therefore has no scrollback buffer available.');
 		}
 
-		// Collect lines from the buffer iterator (oldest to newest)
-		const lines: string[] = [];
+		// Use head/tail approach to avoid collecting the entire buffer into memory before truncating.
+		// For large scrollback buffers, this avoids creating many intermediate strings and arrays.
+		const half = MAX_TERMINAL_CHARS / 2;
+		const headLines: string[] = [];
+		const tailLines: string[] = [];
+		let headChars = 0;
+		let tailChars = 0;
+		let totalChars = 0;
+
+		// Collect lines from the buffer iterator (newest to oldest via reverse iterator)
 		for (const line of terminal.xterm.getBufferReverseIterator()) {
-			lines.unshift(line);
+			const cleanedLine = removeAnsiEscapeCodes(line);
+			totalChars += cleanedLine.length + 1; // +1 for newline
+
+			if (headChars < half) {
+				headLines.push(cleanedLine);
+				headChars += cleanedLine.length + 1;
+			} else if (tailChars < half) {
+				tailLines.push(cleanedLine);
+				tailChars += cleanedLine.length + 1;
+			}
+			// If both head and tail are full, stop collecting
+			if (headChars >= half && tailChars >= half) {
+				break;
+			}
 		}
 
-		let result = removeAnsiEscapeCodes(lines.join('\n'));
+		// headLines are newest→oldest (reverse order from iterator), need to reverse for chronological
+		headLines.reverse();
+		// tailLines are oldest portion (newest→oldest from iterator), reverse for chronological
+		tailLines.reverse();
 
-		if (result.length > MAX_TERMINAL_CHARS) {
-			const half = MAX_TERMINAL_CHARS / 2;
-			result = result.slice(0, half) + '\n...\n' + result.slice(result.length - half);
+		if (totalChars <= MAX_TERMINAL_CHARS) {
+			// If total fits, reconstruct in correct order: tail (older) + head (newer)
+			// Note: tailLines currently holds older lines (collected after head was full)
+			// and headLines holds the newest lines (collected first from reverse iterator)
+			const allLines = [...tailLines, ...headLines];
+			return allLines.join('\n');
 		}
 
-		return result
+		// Truncated output: tail (oldest/beginning) + separator + head (newest/end)
+		// to match original format: first half + '...' + last half
+		const result = tailLines.join('\n') + '\n...\n' + headLines.join('\n');
+		return result;
 	};
 
 	private async _waitForCommandDetectionCapability(terminal: ITerminalInstance) {
@@ -259,146 +304,132 @@ export class TerminalToolService extends Disposable implements ITerminalToolServ
 	}
 
 	runCommand: ITerminalToolService['runCommand'] = async (command, params) => {
-		await this.terminalService.whenConnected;
-
 		const { type } = params
 		const isPersistent = type === 'persistent'
 
-		let terminal: ITerminalInstance
-		const disposables: IDisposable[] = []
+		// ========================================================
+		// TEMPORARY: Use child_process.spawn (via main-process IPC)
+		// Avoids the pty host → IPC → xterm forwarding chain that
+		// is the primary performance hotspot for high-output commands.
+		// ========================================================
+		if (!isPersistent) {
+			const { cwd } = params;
 
-		if (isPersistent) { // BG process
-			const { persistentTerminalId } = params
-			terminal = this.persistentTerminalInstanceOfId[persistentTerminalId];
-			if (!terminal) throw new Error(`Unexpected internal error: Terminal with ID ${persistentTerminalId} did not exist.`);
+			// Generate commandId on the browser side so interrupt() works even
+			// before runCommand() resolves (function calls can't pass through IPC).
+			const commandId = generateUuid();
+			let aborted = false;
+
+			const interrupt = () => {
+				if (aborted) return;
+				aborted = true;
+				// Fire-and-forget abort via IPC. Errors are non-fatal since the
+				// command will be killed by its own timeout mechanisms regardless.
+				this.spawnCommandService.abortCommand(commandId).catch(() => { /* ignore */ });
+			};
+
+			const resPromise = (async () => {
+				const { result, resolveReason } = await this.spawnCommandService.runCommand({
+					command,
+					cwd,
+					maxChars: MAX_TERMINAL_CHARS,
+					idleTimeout: MAX_TERMINAL_INACTIVE_TIME,
+					totalTimeout: MAX_TERMINAL_TOTAL_TIME,
+					commandId,
+				});
+
+				// Format result same as terminal path: prefix command, strip ANSI, truncate
+				let formatted = `$ ${command}\n${result}`;
+				formatted = removeAnsiEscapeCodes(formatted);
+				if (formatted.length > MAX_TERMINAL_CHARS) {
+					const half = MAX_TERMINAL_CHARS / 2;
+					formatted = formatted.slice(0, half)
+						+ '\n...\n'
+						+ formatted.slice(formatted.length - half, Infinity);
+				}
+
+				return { result: formatted, resolveReason };
+			})();
+
+			return { interrupt, resPromise };
 		}
-		else {
-			const { cwd } = params
-			terminal = await this._createTerminal({ cwd: cwd, config: undefined, hidden: true })
-			this.temporaryTerminalInstanceOfId[params.terminalId] = terminal
-		}
+
+		// ========================================================
+		// PERSISTENT: Use VS Code terminal (user-visible, interactive)
+		// ========================================================
+		await this.terminalService.whenConnected;
+
+		const { persistentTerminalId } = params;
+		const terminal = this.persistentTerminalInstanceOfId[persistentTerminalId];
+		if (!terminal) throw new Error(`Unexpected internal error: Terminal with ID ${persistentTerminalId} did not exist.`);
+
+		const disposables: IDisposable[] = [];
 
 		const interrupt = () => {
-			terminal.dispose()
-			if (!isPersistent)
-				delete this.temporaryTerminalInstanceOfId[params.terminalId]
-			else
-				delete this.persistentTerminalInstanceOfId[params.persistentTerminalId]
-		}
+			terminal.dispose();
+			delete this.persistentTerminalInstanceOfId[persistentTerminalId];
+		};
 
 		const waitForResult = async () => {
-			if (isPersistent) {
-				// focus the terminal about to run
-				this.terminalService.setActiveInstance(terminal)
-				await this.terminalService.focusActiveInstance()
-			}
-			let result: string = ''
-			let resolveReason: TerminalResolveReason | undefined
+			// Focus the terminal about to run
+			this.terminalService.setActiveInstance(terminal);
+			await this.terminalService.focusActiveInstance();
 
+			let result: string = '';
+			let resolveReason: TerminalResolveReason | undefined;
 
-			const cmdCap = await this._waitForCommandDetectionCapability(terminal)
-			// if (!cmdCap) throw new Error(`There was an error using the terminal: CommandDetection capability did not mount yet. Please try again in a few seconds or report this to the Void team.`)
-
-			// Prefer the structured command-detection capability when available
+			const cmdCap = await this._waitForCommandDetectionCapability(terminal);
 
 			const waitUntilDone = new Promise<void>(resolve => {
 				if (!cmdCap) {
-					// If CommandDetection capability is not available, we can't detect command completion.
-					// Fall back to the timeout-based mechanism below.
-					resolve()
-					return
+					resolve();
+					return;
 				}
 				const l = cmdCap.onCommandFinished(cmd => {
-					if (resolveReason) return // already resolved
+					if (resolveReason) return;
 					resolveReason = { type: 'done', exitCode: cmd.exitCode ?? 0 };
-					result = cmd.getOutput() ?? ''
-					l.dispose()
-					resolve()
-				})
-				disposables.push(l)
-			})
+					result = cmd.getOutput() ?? '';
+					l.dispose();
+					resolve();
+				});
+				disposables.push(l);
+			});
 
-			// Create timeout/interrupt mechanism BEFORE sendText, so that if sendText
-			// blocks for any reason, the function will still time out instead of hanging forever.
-			const waitUntilInterrupt = isPersistent ?
-				// timeout after X seconds
-				new Promise<void>((res) => {
-					setTimeout(() => {
-						resolveReason = { type: 'total_timeout' };
-						res()
-					}, MAX_TERMINAL_BG_COMMAND_TIME * 1000)
-				})
-				// inactivity-based timeout
-				: new Promise<void>(res => {
-					let idleTimeoutId: ReturnType<typeof setTimeout>;
-					let totalTimeoutId: ReturnType<typeof setTimeout>;
-					const resolveIfNeeded = (reason: TerminalResolveReason) => {
-						if (resolveReason) return
-						resolveReason = reason;
-						res();
-					}
-					const resetTimer = () => {
-						clearTimeout(idleTimeoutId);
-						idleTimeoutId = setTimeout(() => {
-							resolveIfNeeded({ type: 'idle_timeout' });
-						}, MAX_TERMINAL_INACTIVE_TIME * 1000);
-					};
-					totalTimeoutId = setTimeout(() => {
-						resolveIfNeeded({ type: 'total_timeout' });
-					}, MAX_TERMINAL_TOTAL_TIME * 1000);
+			const waitUntilInterrupt = new Promise<void>((res) => {
+				setTimeout(() => {
+					resolveReason = { type: 'total_timeout' };
+					res();
+				}, MAX_TERMINAL_BG_COMMAND_TIME * 1000);
+			});
 
-					const dTimeout = terminal.onData(() => { resetTimer(); });
-					disposables.push(dTimeout, toDisposable(() => {
-						clearTimeout(idleTimeoutId);
-						clearTimeout(totalTimeoutId);
-					}));
-					resetTimer();
-				})
-
-			// Start sending the command only after listeners and timeout mechanisms are attached.
-			// Important: do not await sendText directly here. In some cases _processManager.write()
-			// can stall, and awaiting it would prevent the timeout path from ever resolving.
-			// Instead, only surface sendText failures; successful dispatch stays in the background.
 			const waitForCompletion = Promise.any([waitUntilDone, waitUntilInterrupt]);
 			const sendTextFailure = terminal.sendText(command, true)
-				.then(() => new Promise<never>(() => { }))
+				.then(() => new Promise<never>(() => { }));
 
 			await Promise.race([waitForCompletion, sendTextFailure])
-				.finally(() => disposables.forEach(d => d.dispose()))
+				.finally(() => disposables.forEach(d => d.dispose()));
 
-
-
-			// read result if timed out, since we didn't get it (could clean this code up but it's ok)
-			if (resolveReason?.type === 'idle_timeout' || resolveReason?.type === 'total_timeout') {
-				const terminalId = isPersistent ? params.persistentTerminalId : params.terminalId
-				result = await this.readTerminal(terminalId)
+			// Read result if timed out
+			if (resolveReason?.type === 'total_timeout') {
+				result = await this.readTerminal(persistentTerminalId);
 			}
 
-			if (!isPersistent) {
-				interrupt()
-			}
+			if (!resolveReason) throw new Error('Unexpected internal error: Promise.any should have resolved with a reason.');
 
-			if (!resolveReason) throw new Error('Unexpected internal error: Promise.any should have resolved with a reason.')
-
-			if (!isPersistent) result = `$ ${command}\n${result}`
-			result = removeAnsiEscapeCodes(result)
-			// trim
+			result = removeAnsiEscapeCodes(result);
 			if (result.length > MAX_TERMINAL_CHARS) {
-				const half = MAX_TERMINAL_CHARS / 2
+				const half = MAX_TERMINAL_CHARS / 2;
 				result = result.slice(0, half)
 					+ '\n...\n'
-					+ result.slice(result.length - half, Infinity)
+					+ result.slice(result.length - half, Infinity);
 			}
 
-			return { result, resolveReason }
+			return { result, resolveReason };
+		};
 
-		}
-		const resPromise = waitForResult()
+		const resPromise = waitForResult();
 
-		return {
-			interrupt,
-			resPromise,
-		}
+		return { interrupt, resPromise };
 	}
 
 
