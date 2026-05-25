@@ -265,6 +265,37 @@ const paragraphToLatexSegments = (paragraphText: string) => {
 }
 
 
+// thresholds for collapsed code blocks to avoid creating heavy Monaco editor instances for very large code
+const MAX_INLINE_CODE_CHARS = 30_000
+const MAX_INLINE_CODE_LINES = 300
+
+const CollapsedCodeBlock = ({ codeStr, language }: { codeStr: string, language: string }) => {
+	const [isExpanded, setIsExpanded] = useState(false)
+
+	if (isExpanded) {
+		return <BlockCode initValue={codeStr} language={language} />
+	}
+
+	const lines = codeStr.split('\n')
+	const previewLines = lines.slice(0, 20)
+	const previewStr = previewLines.join('\n')
+	const collapsedLineCount = lines.length - previewLines.length
+
+	return (
+		<div className='border border-void-border-3 rounded overflow-hidden'>
+			<pre className='bg-void-bg-3 text-void-fg-4 text-[12px] p-2 whitespace-pre overflow-auto max-h-[300px]'>
+				<code>{previewStr}{previewLines.length < lines.length ? '\n...' : ''}</code>
+			</pre>
+			<div
+				className='bg-void-bg-2 text-void-fg-3 text-xs px-2 py-1 cursor-pointer hover:brightness-95 select-none flex items-center gap-1'
+				onClick={() => setIsExpanded(true)}
+			>
+				<span>{collapsedLineCount} more lines hidden · {language || 'code'} · Click to expand</span>
+			</div>
+		</div>
+	)
+}
+
 export type RenderTokenOptions = { isApplyEnabled?: boolean, isLinkDetectionEnabled?: boolean }
 const RenderToken = ({ token, inPTag, codeURI, chatMessageLocation, tokenIdx, ...options }: { token: Token | string, inPTag?: boolean, codeURI?: URI, chatMessageLocation?: ChatMessageLocation, tokenIdx: string, } & RenderTokenOptions): React.ReactNode => {
 	const accessor = useAccessor()
@@ -308,6 +339,14 @@ const RenderToken = ({ token, inPTag, codeURI, chatMessageLocation, tokenIdx, ..
 			language = detectLanguage(languageService, { uri, fileContents: contents })
 		}
 
+		const lineCount = contents.split('\n').length
+		const isLargeCodeBlock = contents.length > MAX_INLINE_CODE_CHARS || lineCount > MAX_INLINE_CODE_LINES
+
+		// render collapsed preview for large code blocks to avoid creating heavy Monaco editor instances
+		if (isLargeCodeBlock && !options.isApplyEnabled) {
+			return <CollapsedCodeBlock codeStr={contents} language={language} />
+		}
+
 		if (options.isApplyEnabled && chatMessageLocation) {
 			const isCodeblockClosed = t.raw.trimEnd().endsWith('```') // user should only be able to Apply when the code has been closed (t.raw ends with '```')
 
@@ -323,10 +362,14 @@ const RenderToken = ({ token, inPTag, codeURI, chatMessageLocation, tokenIdx, ..
 				language={language}
 				uri={uri || 'current'}
 			>
-				<BlockCode
-					initValue={contents.trimEnd()} // \n\n adds a permanent newline which creates a flash
-					language={language}
-				/>
+				{isLargeCodeBlock ? (
+					<CollapsedCodeBlock codeStr={contents.trimEnd()} language={language} />
+				) : (
+					<BlockCode
+						initValue={contents.trimEnd()} // \n\n adds a permanent newline which creates a flash
+						language={language}
+					/>
+				)}
 			</BlockCodeApplyWrapper>
 		}
 

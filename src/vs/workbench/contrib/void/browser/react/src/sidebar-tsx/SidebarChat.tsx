@@ -3,7 +3,7 @@
  *  Licensed under the Apache License, Version 2.0. See LICENSE.txt for more information.
  *--------------------------------------------------------------------------------------*/
 
-import React, { ButtonHTMLAttributes, FormEvent, FormHTMLAttributes, Fragment, KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { ButtonHTMLAttributes, FormEvent, FormHTMLAttributes, Fragment, KeyboardEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 
 
 import { useAccessor, useChatThreadsState, useChatThreadsStreamState, useSettingsState, useActiveURI, useCommandBarState, useFullChatThreadsStreamState, useIsAnyThreadRunning } from '../util/services.js';
@@ -1340,7 +1340,7 @@ const AssistantMessageComponent = ({ chatMessage, isCheckpointGhost, isCommitted
 							string={reasoningStr}
 							chatMessageLocation={chatMessageLocation}
 							isApplyEnabled={false}
-							isLinkDetectionEnabled={true}
+							isLinkDetectionEnabled={isCommitted}
 						/>
 					</SmallProseWrapper>
 				</ReasoningWrapper>
@@ -1355,7 +1355,7 @@ const AssistantMessageComponent = ({ chatMessage, isCheckpointGhost, isCommitted
 						string={chatMessage.displayContent || ''}
 						chatMessageLocation={chatMessageLocation}
 						isApplyEnabled={true}
-						isLinkDetectionEnabled={true}
+						isLinkDetectionEnabled={isCommitted}
 					/>
 				</ProseWrapper>
 			</div>
@@ -2944,6 +2944,24 @@ export const SidebarChat = () => {
 	const threadId = currentThread.id
 	const currCheckpointIdx = chatThreadsState.allThreads[threadId]?.state?.currCheckpointIdx ?? undefined  // if not exist, treat like checkpoint is last message (infinity)
 
+	// virtual-scroll: incremental lazy load to keep DOM/memory bounded
+	const BATCH_SIZE = 80
+	const [loadedCount, setLoadedCount] = useState(BATCH_SIZE)
+	// reset when switching threads
+	useEffect(() => { setLoadedCount(BATCH_SIZE) }, [threadId])
+
+	// preserve scroll position when prepending older messages
+	const prependScrollHeightRef = useRef(0)
+	useLayoutEffect(() => {
+		const el = scrollContainerRef.current
+		if (!el || prependScrollHeightRef.current === 0) return
+		const heightAdded = el.scrollHeight - prependScrollHeightRef.current
+		if (heightAdded > 0) {
+			el.scrollTop += heightAdded
+		}
+		prependScrollHeightRef.current = 0
+	}, [loadedCount])
+
 
 
 	// resolve mount info
@@ -2960,24 +2978,34 @@ export const SidebarChat = () => {
 
 
 
+	const { visibleMessages, hiddenMessageCount } = useMemo(() => {
+		const clampedCount = Math.min(loadedCount, previousMessages.length)
+		return {
+			visibleMessages: previousMessages.slice(-clampedCount),
+			hiddenMessageCount: previousMessages.length - clampedCount,
+		}
+	}, [previousMessages, loadedCount])
+
 	const previousMessagesHTML = useMemo(() => {
 		// const lastMessageIdx = previousMessages.findLastIndex(v => v.role !== 'checkpoint')
 		// tool request shows up as Editing... if in progress
-		return previousMessages.map((message, i) => {
+		return visibleMessages.map((message, i) => {
+			// original index = i + (hiddenMessageCount > 0 ? hiddenMessageCount : 0)
+			const originalIdx = i + (previousMessages.length - visibleMessages.length)
 			return <ChatBubble
-				key={i}
+				key={originalIdx}
 				currCheckpointIdx={currCheckpointIdx}
 				chatMessage={message}
-				messageIdx={i}
+				messageIdx={originalIdx}
 				isCommitted={true}
 				chatIsRunning={isRunning}
 				threadId={threadId}
 				_scrollToBottom={() => scrollToBottom(scrollContainerRef)}
 			/>
 		})
-	}, [previousMessages, threadId, currCheckpointIdx, isRunning])
+	}, [visibleMessages, previousMessages.length, threadId, currCheckpointIdx, isRunning])
 
-	const streamingChatIdx = previousMessagesHTML.length
+	const streamingChatIdx = previousMessages.length
 	const compressingDisplayContent = isRunning === 'compressing' ? COMPRESSING_HISTORY_LABEL : ''
 	const currStreamingMessageHTML = reasoningSoFar || displayContentSoFar || compressingDisplayContent || isRunning ?
 		<ChatBubble
@@ -3019,6 +3047,20 @@ export const SidebarChat = () => {
 			${previousMessagesHTML.length === 0 && !displayContentSoFar && !compressingDisplayContent ? 'hidden' : ''}
 		`}
 	>
+		{/* show older messages banner */}
+		{hiddenMessageCount > 0 && (
+			<div
+				className='text-center py-2 cursor-pointer select-none text-void-fg-3 text-xs border border-void-border-3 rounded bg-void-bg-2 mx-2 hover:brightness-95 transition-all duration-200'
+				onClick={() => {
+					const el = scrollContainerRef.current
+					if (el) prependScrollHeightRef.current = el.scrollHeight
+					setLoadedCount(prev => prev + BATCH_SIZE)
+				}}
+			>
+				↑ {hiddenMessageCount} older message{hiddenMessageCount !== 1 ? 's' : ''} hidden · Showing {visibleMessages.length} of {previousMessages.length} · Click to load {Math.min(BATCH_SIZE, hiddenMessageCount)} more
+			</div>
+		)}
+
 		{/* previous messages */}
 		{previousMessagesHTML}
 		{currStreamingMessageHTML}

@@ -44,7 +44,7 @@ import { RawMCPToolCall } from '../common/mcpServiceTypes.js';
 // related to retrying when LLM message has error
 const CHAT_RETRIES = 3
 const RETRY_DELAY = 2500
-const LLM_STREAM_STATE_THROTTLE_MS = 33
+const LLM_STREAM_STATE_THROTTLE_MS = 120
 
 
 const findStagingSelectionIndex = (currentSelections: StagingSelectionItem[] | undefined, newSelection: StagingSelectionItem): number | null => {

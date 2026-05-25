@@ -626,8 +626,8 @@ ${details.map((d, i) => `${i + 1}. ${d}`).join('\n\n')}`)
 // }
 
 export const CHAT_HISTORY_COMPRESSION = {
-	maxFullRounds: 3,
-	roundsPerSummaryChunk: 3,
+	maxFullRounds: 5,
+	roundsPerSummaryChunk: 5,
 	maxSummaryChars: 5000,
 } as const
 
