@@ -278,6 +278,8 @@ class VoidSettingsService extends Disposable implements IVoidSettingsService {
 			readS = await this._readState();
 			// 1.0.3 addition, remove when enough users have had this code run
 			if (readS.globalSettings.includeToolLintErrors === undefined) readS.globalSettings.includeToolLintErrors = true
+			if (readS.globalSettings.parallelReadonlyTools === undefined) readS.globalSettings.parallelReadonlyTools = true
+			if (readS.globalSettings.parallelWriteTools === undefined) readS.globalSettings.parallelWriteTools = true
 
 			// autoapprove is now an obj not a boolean (1.2.5)
 			if (typeof readS.globalSettings.autoApprove === 'boolean') readS.globalSettings.autoApprove = {}

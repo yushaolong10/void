@@ -89,11 +89,25 @@ const prepareMessages_openai_tools = (messages: SimpleLLMMessage[]): AnthropicOr
 
 		if (currMsg.role !== 'tool') {
 			if (currMsg.role === 'assistant') {
-				newMessages.push({
+				const assistantMsg: OpenAILLMChatMessage = {
 					role: 'assistant',
 					content: currMsg.content,
 					reasoning_content: currMsg.reasoning || undefined,
-				})
+				}
+				const toolCalls: { type: 'function'; id: string; function: { name: string; arguments: string; } }[] = []
+				for (let j = i + 1; j < messages.length && messages[j].role === 'tool'; j += 1) {
+					const toolMsg = messages[j] as SimpleLLMMessage & { role: 'tool' }
+					toolCalls.push({
+						type: 'function',
+						id: toolMsg.id,
+						function: {
+							name: toolMsg.name,
+							arguments: JSON.stringify(toolMsg.rawParams)
+						}
+					})
+				}
+				if (toolCalls.length > 0) assistantMsg.tool_calls = toolCalls
+				newMessages.push(assistantMsg)
 				continue
 			}
 			newMessages.push(currMsg)
@@ -103,14 +117,17 @@ const prepareMessages_openai_tools = (messages: SimpleLLMMessage[]): AnthropicOr
 		// edit previous assistant message to have called the tool
 		const prevMsg = 0 <= i - 1 && i - 1 <= newMessages.length ? newMessages[i - 1] : undefined
 		if (prevMsg?.role === 'assistant') {
-			prevMsg.tool_calls = [{
+			const toolCall = {
 				type: 'function',
 				id: currMsg.id,
 				function: {
 					name: currMsg.name,
 					arguments: JSON.stringify(currMsg.rawParams)
 				}
-			}]
+			} as const
+			if (!prevMsg.tool_calls?.some(t => t.id === currMsg.id)) {
+				prevMsg.tool_calls = [...(prevMsg.tool_calls ?? []), toolCall]
+			}
 		}
 
 		// add the tool
@@ -179,6 +196,16 @@ const prepareMessages_anthropic_tools = (messages: SimpleLLMMessage[], supportsA
 					// strip away anthropicReasoning
 				}
 			}
+			const assistantMsg = newMessages[i]
+			if (assistantMsg.role === 'assistant') {
+				if (typeof assistantMsg.content === 'string') assistantMsg.content = [{ type: 'text', text: assistantMsg.content }]
+				for (let j = i + 1; j < messages.length && messages[j].role === 'tool'; j += 1) {
+					const toolMsg = messages[j] as SimpleLLMMessage & { role: 'tool' }
+					if (!assistantMsg.content.some(c => c.type === 'tool_use' && c.id === toolMsg.id)) {
+						assistantMsg.content.push({ type: 'tool_use', id: toolMsg.id, name: toolMsg.name, input: toolMsg.rawParams })
+					}
+				}
+			}
 			continue
 		}
 
@@ -197,7 +224,9 @@ const prepareMessages_anthropic_tools = (messages: SimpleLLMMessage[], supportsA
 			// make it so the assistant called the tool
 			if (prevMsg?.role === 'assistant') {
 				if (typeof prevMsg.content === 'string') prevMsg.content = [{ type: 'text', text: prevMsg.content }]
-				prevMsg.content.push({ type: 'tool_use', id: currMsg.id, name: currMsg.name, input: currMsg.rawParams })
+				if (!prevMsg.content.some(c => c.type === 'tool_use' && c.id === currMsg.id)) {
+					prevMsg.content.push({ type: 'tool_use', id: currMsg.id, name: currMsg.name, input: currMsg.rawParams })
+				}
 			}
 
 			// turn each tool into a user message with tool results at the end
@@ -211,7 +240,17 @@ const prepareMessages_anthropic_tools = (messages: SimpleLLMMessage[], supportsA
 	}
 
 	// we just removed the tools
-	return newMessages as AnthropicLLMChatMessage[]
+	const mergedMessages: AnthropicLLMChatMessage[] = []
+	for (const message of newMessages as AnthropicLLMChatMessage[]) {
+		const previous = mergedMessages[mergedMessages.length - 1]
+		if (previous?.role === 'user' && message.role === 'user' && Array.isArray(previous.content) && Array.isArray(message.content)) {
+			previous.content.push(...message.content)
+		}
+		else {
+			mergedMessages.push(message)
+		}
+	}
+	return mergedMessages
 }
 
 
@@ -221,14 +260,18 @@ const prepareMessages_XML_tools = (messages: SimpleLLMMessage[], supportsAnthrop
 	for (let i = 0; i < messages.length; i += 1) {
 
 		const c = messages[i]
-		const next = 0 <= i + 1 && i + 1 <= messages.length - 1 ? messages[i + 1] : null
 
 		if (c.role === 'assistant') {
 			// if called a tool (message after it), re-add its XML to the message
 			// alternatively, could just hold onto the original output, but this way requires less piping raw strings everywhere
 			let content: AnthropicOrOpenAILLMMessage['content'] = c.content
-			if (next?.role === 'tool') {
-				content = `${content}\n\n${reParsedToolXMLString(next.name, next.rawParams)}`
+			const toolXMLStrings: string[] = []
+			for (let j = i + 1; j < messages.length && messages[j].role === 'tool'; j += 1) {
+				const toolMsg = messages[j] as SimpleLLMMessage & { role: 'tool' }
+				toolXMLStrings.push(reParsedToolXMLString(toolMsg.name, toolMsg.rawParams))
+			}
+			if (toolXMLStrings.length > 0) {
+				content = `${content}\n\n${toolXMLStrings.join('\n\n')}`
 			}
 
 			// anthropic reasoning

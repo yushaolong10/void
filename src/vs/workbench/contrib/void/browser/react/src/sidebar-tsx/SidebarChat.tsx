@@ -1360,6 +1360,11 @@ const AssistantMessageComponent = ({ chatMessage, isCheckpointGhost, isCommitted
 				</ProseWrapper>
 			</div>
 		}
+		{isCommitted && chatMessage.elapsedMs !== undefined ?
+			<div className={`${isCheckpointGhost ? 'opacity-50' : ''} px-2 text-xs text-void-fg-4 opacity-80 select-none`}>
+				已处理 {formatElapsed(chatMessage.elapsedMs)}
+			</div>
+			: null}
 	</>
 
 }
@@ -2872,6 +2877,82 @@ const EditToolSoFar = ({ toolCallSoFar, }: { toolCallSoFar: RawToolCallObj }) =>
 
 }
 
+const rawToolCallDesc = (toolCall: RawToolCallObj): React.ReactNode => {
+	const rawParams = toolCall.rawParams
+	const uriStr = rawParams.uri
+	if (uriStr) return getBasename(uriStr)
+	if (rawParams.query) return `"${rawParams.query}"`
+	if (rawParams.command) return `"${rawParams.command}"`
+	if (rawParams.persistent_terminal_id) return rawParams.persistent_terminal_id
+	return toolCall.isDone ? '' : 'Generating'
+}
+
+const ToolBatchSoFar = ({ toolCallsSoFar }: { toolCallsSoFar: RawToolCallObj[] }) => {
+	const visibleToolCalls = toolCallsSoFar.slice(0, 8)
+	const hiddenCount = toolCallsSoFar.length - visibleToolCalls.length
+	const title = <span className='flex items-center gap-1'>
+		{`Preparing ${toolCallsSoFar.length} tool call${toolCallsSoFar.length === 1 ? '' : 's'}`}
+		<IconLoading className='w-3 text-sm' />
+	</span>
+	const doneCount = toolCallsSoFar.filter(t => t.isDone).length
+	const desc1 = `${doneCount}/${toolCallsSoFar.length} ready`
+
+	return <ToolHeaderWrapper title={title} desc1={desc1} isOpen={true}>
+		<ToolChildrenWrapper>
+			<div className='flex flex-col gap-1'>
+				{visibleToolCalls.map((toolCall, i) => {
+					const isBuiltin = isABuiltinToolName(toolCall.name)
+					const title = isBuiltin ? titleOfBuiltinToolName[toolCall.name].proposed : `Call ${removeMCPToolNamePrefix(toolCall.name)}`
+					const desc = rawToolCallDesc(toolCall)
+					return <div key={toolCall.id || i} className='flex items-center gap-2 min-w-0 text-xs'>
+						<span className='text-void-fg-3 truncate'>{title}</span>
+						{desc ? <span className='text-void-fg-4 italic truncate'>{desc}</span> : null}
+						<span className='ml-auto flex-shrink-0 text-void-fg-4'>
+							{toolCall.isDone ? 'Ready' : <IconLoading className='w-3 text-sm' />}
+						</span>
+					</div>
+				})}
+				{hiddenCount > 0 ? <div className='text-xs text-void-fg-4'>{hiddenCount} more...</div> : null}
+			</div>
+		</ToolChildrenWrapper>
+	</ToolHeaderWrapper>
+}
+
+const statusTextOfIsRunning = (isRunning: IsRunningType): string | null => {
+	if (isRunning === 'LLM') return 'thinking'
+	if (isRunning === 'tool') return 'running-tool'
+	if (isRunning === 'idle') return 'working'
+	if (isRunning === 'compressing') return 'compressing'
+	return null
+}
+
+const formatElapsed = (elapsedMs: number) => {
+	const totalSeconds = Math.max(0, Math.floor(elapsedMs / 1000))
+	const minutes = Math.floor(totalSeconds / 60)
+	const seconds = totalSeconds % 60
+	if (minutes <= 0) return `${seconds}s`
+	return `${minutes}m ${seconds.toString().padStart(2, '0')}s`
+}
+
+const AgentElapsedStatus = ({ isRunning, startedAt }: { isRunning: IsRunningType, startedAt: number | undefined }) => {
+	const [now, setNow] = useState(Date.now())
+	const statusText = statusTextOfIsRunning(isRunning)
+
+	useEffect(() => {
+		if (!statusText || !startedAt) return
+		setNow(Date.now())
+		const interval = setInterval(() => setNow(Date.now()), 1000)
+		return () => clearInterval(interval)
+	}, [statusText, startedAt])
+
+	if (!statusText || !startedAt) return null
+
+	return <div className='px-2 text-xs text-void-fg-4 opacity-80 select-none flex items-center gap-1'>
+		<IconLoading className='w-3 text-sm opacity-80' />
+		<span>{statusText} · 已处理 {formatElapsed(now - startedAt)}</span>
+	</div>
+}
+
 
 export const SidebarChat = () => {
 	const textAreaRef = useRef<HTMLTextAreaElement | null>(null)
@@ -2897,10 +2978,12 @@ export const SidebarChat = () => {
 	const currThreadStreamState = useChatThreadsStreamState(chatThreadsState.currentThreadId)
 	const isRunning = currThreadStreamState?.isRunning
 	const latestError = currThreadStreamState?.error
-	const { displayContentSoFar, toolCallSoFar, reasoningSoFar } = currThreadStreamState?.llmInfo ?? {}
+	const startedAt = currThreadStreamState?.startedAt
+	const { displayContentSoFar, toolCallSoFar, toolCallsSoFar, reasoningSoFar } = currThreadStreamState?.llmInfo ?? {}
 
 	// this is just if it's currently being generated, NOT if it's currently running
-	const toolIsGenerating = toolCallSoFar && !toolCallSoFar.isDone // show loading for slow tools (right now just edit)
+	const visibleToolCallsSoFar = toolCallsSoFar ?? (toolCallSoFar ? [toolCallSoFar] : null)
+	const toolIsGenerating = visibleToolCallsSoFar && visibleToolCallsSoFar.some(toolCall => !toolCall.isDone)
 
 	// ----- SIDEBAR CHAT state (local) -----
 
@@ -3027,13 +3110,15 @@ export const SidebarChat = () => {
 
 
 	// the tool currently being generated
-	const generatingTool = toolIsGenerating ?
-		toolCallSoFar.name === 'edit_file' || toolCallSoFar.name === 'rewrite_file' ? <EditToolSoFar
-			key={'curr-streaming-tool'}
-			toolCallSoFar={toolCallSoFar}
-		/>
+	const generatingTool = visibleToolCallsSoFar && visibleToolCallsSoFar.length > 1 ?
+		<ToolBatchSoFar key={'curr-streaming-tool-batch'} toolCallsSoFar={visibleToolCallsSoFar} />
+		: toolIsGenerating && toolCallSoFar ?
+			toolCallSoFar.name === 'edit_file' || toolCallSoFar.name === 'rewrite_file' ? <EditToolSoFar
+				key={'curr-streaming-tool'}
+				toolCallSoFar={toolCallSoFar}
+			/>
+				: <ToolBatchSoFar key={'curr-streaming-tool-single'} toolCallsSoFar={[toolCallSoFar]} />
 			: null
-		: null
 
 	const messagesHTML = <ScrollToBottomContainer
 		key={'messages' + chatThreadsState.currentThreadId} // force rerender on all children if id changes
@@ -3065,13 +3150,10 @@ export const SidebarChat = () => {
 		{previousMessagesHTML}
 		{currStreamingMessageHTML}
 
+		<AgentElapsedStatus isRunning={isRunning} startedAt={startedAt} />
+
 		{/* Generating tool */}
 		{generatingTool}
-
-    {/* loading indicator */}
-		{isRunning === 'LLM' || isRunning === 'idle' && !toolIsGenerating ? <ProseWrapper>
-			{<IconLoading className='opacity-50 text-sm' />}
-		</ProseWrapper> : null}
 
 		{/* error message */}
 		{latestError === undefined ? null :

@@ -449,6 +449,8 @@ export type GlobalSettings = {
 	autoApprove: { [approvalType in ToolApprovalType]?: boolean };
 	showInlineSuggestions: boolean;
 	includeToolLintErrors: boolean;
+	parallelReadonlyTools: boolean;
+	parallelWriteTools: boolean;
 	isOnboardingComplete: boolean;
 	disableSystemMessage: boolean;
 	autoAcceptLLMChanges: boolean;
@@ -465,6 +467,8 @@ export const defaultGlobalSettings: GlobalSettings = {
 	autoApprove: {},
 	showInlineSuggestions: true,
 	includeToolLintErrors: true,
+	parallelReadonlyTools: true,
+	parallelWriteTools: true,
 	isOnboardingComplete: false,
 	disableSystemMessage: false,
 	autoAcceptLLMChanges: false,

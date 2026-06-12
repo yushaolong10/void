@@ -14,7 +14,6 @@ import { EndOfLinePreference } from '../../../../editor/common/model.js'
 import { IVoidCommandBarService } from './voidCommandBarService.js'
 import { computeDirectoryTree1Deep, IDirectoryStrService, stringifyDirectoryTree1Deep } from '../common/directoryStrService.js'
 import { IMarkerService, MarkerSeverity } from '../../../../platform/markers/common/markers.js'
-import { timeout } from '../../../../base/common/async.js'
 import { RawToolParamsObj } from '../common/sendLLMMessageTypes.js'
 import { MAX_CHILDREN_URIs_PAGE, MAX_FILE_CHARS_PAGE, MAX_TERMINAL_BG_COMMAND_TIME, MAX_TERMINAL_INACTIVE_TIME, MAX_TERMINAL_TOTAL_TIME } from '../common/prompt/prompts.js'
 import { IVoidSettingsService } from '../common/voidSettingsService.js'
@@ -164,6 +163,27 @@ export class ToolsService implements IToolsService {
 		@IVoidSettingsService private readonly voidSettingsService: IVoidSettingsService,
 	) {
 		const queryBuilder = instantiationService.createInstance(QueryBuilder);
+		const waitForMarkerSettle = async (uri: URI, { timeoutMs = 1000, settleMs = 100 } = {}) => {
+			await new Promise<void>(resolve => {
+				let isDone = false
+				let settleTimeout: any
+				let timeoutHandle: any
+				const disposable = this.markerService.onMarkerChanged(changedResources => {
+					if (!changedResources.some(resource => resource.toString() === uri.toString())) return
+					clearTimeout(settleTimeout)
+					settleTimeout = setTimeout(finish, settleMs)
+				})
+				const finish = () => {
+					if (isDone) return
+					isDone = true
+					clearTimeout(settleTimeout)
+					clearTimeout(timeoutHandle)
+					disposable.dispose()
+					resolve()
+				}
+				timeoutHandle = setTimeout(finish, timeoutMs)
+			})
+		}
 
 		this.validateParams = {
 			read_file: (params: RawToolParamsObj) => {
@@ -409,7 +429,7 @@ export class ToolsService implements IToolsService {
 			},
 
 			read_lint_errors: async ({ uri }) => {
-				await timeout(1000)
+				await waitForMarkerSettle(uri)
 				const { lintErrors } = this._getLintErrors(uri)
 				return { result: { lintErrors } }
 			},
@@ -440,7 +460,7 @@ export class ToolsService implements IToolsService {
 				// at end, get lint errors (only if user wants them, otherwise skip the 1s delay)
 				const includeLintErrors = this.voidSettingsService.state.globalSettings.includeToolLintErrors
 				const lintErrorsPromise = includeLintErrors ? Promise.resolve().then(async () => {
-					await timeout(1000)
+					await waitForMarkerSettle(uri)
 					const { lintErrors } = this._getLintErrors(uri)
 					return { lintErrors }
 				}) : Promise.resolve({ lintErrors: null })
@@ -458,7 +478,7 @@ export class ToolsService implements IToolsService {
 				// at end, get lint errors (only if user wants them, otherwise skip the 1s delay)
 				const includeLintErrors = this.voidSettingsService.state.globalSettings.includeToolLintErrors
 				const lintErrorsPromise = includeLintErrors ? Promise.resolve().then(async () => {
-					await timeout(1000)
+					await waitForMarkerSettle(uri)
 					const { lintErrors } = this._getLintErrors(uri)
 					return { lintErrors }
 				}) : Promise.resolve({ lintErrors: null })

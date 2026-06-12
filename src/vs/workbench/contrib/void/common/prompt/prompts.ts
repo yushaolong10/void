@@ -412,8 +412,12 @@ const systemToolsXMLPrompt = (chatMode: ChatMode, mcpTools: InternalToolInfo[] |
     - The XML root tag must be exactly the tool name, for example <ls_dir>...</ls_dir>.
     - Do NOT wrap tool calls in generic tags such as <tool_call name="ls_dir">...</tool_call>.
     - Do NOT put tool XML inside markdown code fences.
-    - Use exactly ONE root tool call per response.
-    - After outputting the single closing tag for the root tool call, stop immediately and wait for the tool result.
+    - You may call multiple tools in one response when every call is independent and safe to run concurrently.
+    - Prefer batching independent read/search/list tools such as read_file, ls_dir, get_dir_tree, search_pathnames_only, search_for_files, and search_in_file.
+    - You may also batch independent write tools when they affect different files or parent directories.
+    - Do not batch tools when a later tool depends on an earlier result.
+    - Do not batch delete operations, terminal commands, MCP tools, or multiple writes to the same file.
+    - After outputting the closing tag for the final tool call, stop immediately and wait for the tool results.
     - All parameters are required unless their description says Optional.
     - Parameter values are plain text. Do NOT include XML tags, closing tags, partial tags, or markdown fences inside parameter values.
     - Escape or avoid any content in parameter values that would be parsed as XML markup.
@@ -470,8 +474,8 @@ ${FINAL}
     - For run_persistent_command, the only valid final characters of the response are exactly </run_persistent_command>.
     - For open_persistent_terminal, the only valid final characters of the response are exactly </open_persistent_terminal>.
     - For kill_persistent_terminal, the only valid final characters of the response are exactly </kill_persistent_terminal>.
-    - Never output multiple root tool calls in one response.
-    - If you are uncertain about formatting, output one small, valid tool call and stop.
+    - Multiple root tool calls are allowed only for independent read-only calls or independent writes to different files.
+    - If you are uncertain about formatting or dependency order, output one small, valid tool call and stop.
 
     edit_file-specific requirements:
     - The SEARCH/REPLACE blocks belong inside <search_replace_blocks> as one string value.
@@ -540,7 +544,7 @@ ${activeURI}
 	if (mode === 'agent' || mode === 'gather') {
 		details.push(`Only call tools when they help accomplish the user's goal. If the user simply says hi or asks a question that can be answered without repository context, do NOT use tools.`)
 		details.push(`If a tool is needed, you do not need to ask for permission unless the action is destructive, outside the workspace, or otherwise risky.`)
-		details.push('Only use ONE tool call at a time.')
+		details.push('You may call multiple tools in one response when they are independent read-only calls, or independent write calls that affect different files. Use one tool call at a time when there is any dependency, terminal command, MCP tool, delete operation, or same-file write.')
 		details.push(`Do not say something like "I'm going to use \`tool_name\`". When making a tool call, output only the XML tool call with no prose before or after it.`)
 		details.push(`Many tools only work if the user has a workspace open. If no workspace is available, explain the limitation and continue with the best available context.`)
 		details.push(`Use search_pathnames_only when looking for a specific filename or path.`)

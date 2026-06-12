@@ -420,6 +420,49 @@ const extractToolCallFromSourceText = (
 	return inferMalformedXMLToolCall(sourceText, toolId, toolOfToolName)
 }
 
+const extractCompletedToolCallsFromSourceText = (
+	sourceText: string,
+	firstToolId: string,
+	toolOfToolName: ToolOfToolName,
+): { displayText: string, toolCalls: RawToolCallObj[] } | null => {
+	const toolNames = Object.keys(toolOfToolName) as ToolName[]
+	let searchIdx = 0
+	let displayEndIdx: number | null = null
+	const toolCalls: RawToolCallObj[] = []
+
+	while (searchIdx < sourceText.length) {
+		let nextMatch: { idx: number, toolName: ToolName } | null = null
+		for (const toolName of toolNames) {
+			const idx = sourceText.indexOf(`<${toolName}>`, searchIdx)
+			if (idx === -1) continue
+			if (nextMatch === null || idx < nextMatch.idx) nextMatch = { idx, toolName }
+		}
+		if (nextMatch === null) break
+
+		const closeTag = `</${nextMatch.toolName}>`
+		const closeIdx = sourceText.indexOf(closeTag, nextMatch.idx)
+		if (closeIdx === -1) break
+
+		if (displayEndIdx === null) displayEndIdx = nextMatch.idx
+		const endIdx = closeIdx + closeTag.length
+		const toolText = sourceText.substring(nextMatch.idx, endIdx)
+		const toolCall = parseXMLPrefixToToolCall(
+			nextMatch.toolName,
+			toolCalls.length === 0 ? firstToolId : `${firstToolId}-${toolCalls.length + 1}`,
+			toolText,
+			toolOfToolName,
+		)
+		if (Object.keys(toolCall.rawParams).length > 0) toolCalls.push(toolCall)
+		searchIdx = endIdx
+	}
+
+	if (toolCalls.length === 0 || displayEndIdx === null) return null
+	return {
+		displayText: sourceText.substring(0, displayEndIdx).trimEnd(),
+		toolCalls,
+	}
+}
+
 const toolCallCompletenessScore = (toolCall: RawToolCallObj | undefined): number => {
 	if (!toolCall) return -1
 	const doneParamsScore = toolCall.doneParams.length * 10_000
@@ -451,6 +494,7 @@ export const extractXMLToolsWrapper = (
 	let trueFullReasoning = ''
 	let latestToolCall: RawToolCallObj | undefined = undefined
 	let bestToolCallSeen: RawToolCallObj | undefined = undefined
+	let latestToolCalls: RawToolCallObj[] | undefined = undefined
 
 	let foundOpenTag: { idx: number, toolName: ToolName } | null = null
 	let openToolTagBuffer = '' // the characters we've seen so far that come after a < with no space afterwards, not yet added to fullText
@@ -520,11 +564,14 @@ export const extractXMLToolsWrapper = (
 		if (toolCallCompletenessScore(latestToolCall) > toolCallCompletenessScore(bestToolCallSeen)) {
 			bestToolCallSeen = latestToolCall
 		}
+		const completedToolCalls = extractCompletedToolCallsFromSourceText(trueFullText, toolId, toolOfToolName)
+		latestToolCalls = completedToolCalls?.toolCalls
 
 		onText({
 			...params,
 			fullText,
 			toolCall: latestToolCall,
+			toolCalls: latestToolCalls,
 		});
 	};
 
@@ -535,8 +582,15 @@ export const extractXMLToolsWrapper = (
 
 		fullText = fullText.trimEnd()
 		let toolCall = toolCallCompletenessScore(bestToolCallSeen) > toolCallCompletenessScore(latestToolCall) ? bestToolCallSeen : latestToolCall
+		let toolCalls = latestToolCalls
 		let fullReasoning = params.fullReasoning
 
+		const inferredCompleted = extractCompletedToolCallsFromSourceText(trueFullText, toolId, toolOfToolName)
+		if (inferredCompleted && inferredCompleted.toolCalls.length > 1) {
+			fullText = inferredCompleted.displayText
+			toolCalls = inferredCompleted.toolCalls
+			toolCall = toolCalls[0]
+		}
 		if (!toolCall || Object.keys(toolCall.rawParams).length === 0) {
 			const inferred = extractToolCallFromSourceText(trueFullText, toolId, toolOfToolName)
 			if (inferred) {
@@ -560,7 +614,7 @@ export const extractXMLToolsWrapper = (
 		// console.log('----- tools ----\n', JSON.stringify(firstToolCallRef.current, null, 2))
 		// console.log('----- toolCall ----\n', JSON.stringify(toolCall, null, 2))
 
-		onFinalMessage({ ...params, fullText, fullReasoning, toolCall: toolCall })
+		onFinalMessage({ ...params, fullText, fullReasoning, toolCall: toolCall, toolCalls: toolCalls })
 	}
 	return { newOnText, newOnFinalMessage };
 }

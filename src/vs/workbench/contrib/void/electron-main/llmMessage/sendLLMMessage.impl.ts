@@ -302,6 +302,32 @@ const rawToolCallObjOfParamsStr = (name: string, toolParamsStr: string, id: stri
 	return { id, name, rawParams, doneParams: Object.keys(rawParams), isDone: true }
 }
 
+type StreamingOpenAIToolCall = {
+	name: string;
+	paramsStr: string;
+	id: string;
+}
+
+const partialRawToolCallsOfOpenAIToolCalls = (toolCallsByIndex: Map<number, StreamingOpenAIToolCall>): RawToolCallObj[] => {
+	return [...toolCallsByIndex.entries()]
+		.sort(([a], [b]) => a - b)
+		.filter(([, toolCall]) => !!toolCall.name)
+		.map(([index, toolCall]) => ({
+			name: toolCall.name,
+			rawParams: {},
+			doneParams: [],
+			isDone: false,
+			id: toolCall.id || `tool_call_${index}`,
+		}))
+}
+
+const rawToolCallsOfOpenAIToolCalls = (toolCallsByIndex: Map<number, StreamingOpenAIToolCall>): RawToolCallObj[] => {
+	return [...toolCallsByIndex.entries()]
+		.sort(([a], [b]) => a - b)
+		.map(([index, toolCall]) => rawToolCallObjOfParamsStr(toolCall.name, toolCall.paramsStr, toolCall.id || generateUuid()))
+		.filter((toolCall): toolCall is RawToolCallObj => !!toolCall)
+}
+
 
 const rawToolCallObjOfAnthropicParams = (toolBlock: Anthropic.Messages.ToolUseBlock): RawToolCallObj | null => {
 	const { id, name, input } = toolBlock
@@ -376,9 +402,7 @@ const _sendOpenAICompatibleChat = async ({ messages, onText, onFinalMessage, onE
 	let fullReasoningSoFar = ''
 	let fullTextSoFar = ''
 
-	let toolName = ''
-	let toolId = ''
-	let toolParamsStr = ''
+	const toolCallsByIndex = new Map<number, StreamingOpenAIToolCall>()
 
 	openai.chat.completions
 		.create(options)
@@ -402,11 +426,11 @@ const _sendOpenAICompatibleChat = async ({ messages, onText, onFinalMessage, onE
 					// tool call
 					for (const tool of chunk.choices[0]?.delta?.tool_calls ?? []) {
 						const index = tool.index
-						if (index !== 0) continue
-
-						toolName += tool.function?.name ?? ''
-						toolParamsStr += tool.function?.arguments ?? '';
-						toolId += tool.id ?? ''
+						const current = toolCallsByIndex.get(index) ?? { name: '', paramsStr: '', id: '' }
+						current.name += tool.function?.name ?? ''
+						current.paramsStr += tool.function?.arguments ?? '';
+						current.id += tool.id ?? ''
+						toolCallsByIndex.set(index, current)
 					}
 
 
@@ -419,20 +443,22 @@ const _sendOpenAICompatibleChat = async ({ messages, onText, onFinalMessage, onE
 					}
 
 					// call onText
+					const partialToolCalls = partialRawToolCallsOfOpenAIToolCalls(toolCallsByIndex)
 					onText({
 						fullText: fullTextSoFar,
 						fullReasoning: fullReasoningSoFar,
-						toolCall: !toolName ? undefined : { name: toolName, rawParams: {}, isDone: false, doneParams: [], id: toolId },
+						toolCall: partialToolCalls[0],
+						toolCalls: partialToolCalls.length > 0 ? partialToolCalls : undefined,
 					})
 
 				}
 				// on final
-				if (!fullTextSoFar && !fullReasoningSoFar && !toolName) {
+				if (!fullTextSoFar && !fullReasoningSoFar && toolCallsByIndex.size === 0) {
 					onError({ message: 'Void: Response from model was empty.', fullError: null })
 				}
 				else {
-					const toolCall = rawToolCallObjOfParamsStr(toolName, toolParamsStr, toolId)
-					const toolCallObj = toolCall ? { toolCall } : {}
+					const toolCalls = rawToolCallsOfOpenAIToolCalls(toolCallsByIndex)
+					const toolCallObj = toolCalls.length > 0 ? { toolCall: toolCalls[0], toolCalls } : {}
 					onFinalMessage({ fullText: fullTextSoFar, fullReasoning: fullReasoningSoFar, anthropicReasoning: null, ...toolCallObj });
 				}
 			} finally {

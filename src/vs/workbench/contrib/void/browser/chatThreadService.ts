@@ -34,6 +34,7 @@ import { THREAD_STORAGE_KEY } from '../common/storageKeys.js';
 import { IConvertToLLMMessageService } from './convertToLLMMessageService.js';
 import { RunOnceScheduler, timeout } from '../../../../base/common/async.js';
 import { deepClone } from '../../../../base/common/objects.js';
+import { dirname } from '../../../../base/common/resources.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { IDirectoryStrService } from '../common/directoryStrService.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
@@ -45,6 +46,22 @@ import { RawMCPToolCall } from '../common/mcpServiceTypes.js';
 const CHAT_RETRIES = 3
 const RETRY_DELAY = 2500
 const LLM_STREAM_STATE_THROTTLE_MS = 120
+
+const parallelReadonlyBuiltinTools = new Set<string>([
+	'read_file',
+	'ls_dir',
+	'get_dir_tree',
+	'search_pathnames_only',
+	'search_for_files',
+	'search_in_file',
+	'read_lint_errors',
+])
+
+const parallelWriteBuiltinTools = new Set<string>([
+	'rewrite_file',
+	'edit_file',
+	'create_file_or_folder',
+])
 
 
 const findStagingSelectionIndex = (currentSelections: StagingSelectionItem[] | undefined, newSelection: StagingSelectionItem): number | null => {
@@ -101,6 +118,11 @@ type UserMessageState = UserMessageType['state']
 const defaultMessageState: UserMessageState = {
 	stagingSelections: [],
 	isBeingEdited: false,
+}
+type EarlyReadonlyToolRun = {
+	toolCall: RawToolCallObj;
+	promise: Promise<ChatMessage & { role: 'tool' }>;
+	interruptTool?: () => void;
 }
 
 // a 'thread' means a chat message history
@@ -165,22 +187,26 @@ export type ThreadStreamState = {
 	[threadId: string]: undefined | {
 		isRunning: undefined;
 		error?: { message: string, fullError: Error | null, };
+		startedAt?: undefined;
 		llmInfo?: undefined;
 		toolInfo?: undefined;
 		interrupt?: undefined;
 	} | { // an assistant message is being written
 		isRunning: 'LLM';
 		error?: undefined;
+		startedAt?: number;
 		llmInfo: {
 			displayContentSoFar: string;
 			reasoningSoFar: string;
 			toolCallSoFar: RawToolCallObj | null;
+			toolCallsSoFar: RawToolCallObj[] | null;
 		};
 		toolInfo?: undefined;
 		interrupt: Promise<() => void>; // calling this should have no effect on state - would be too confusing. it just cancels the tool
 	} | { // a tool is being run
 		isRunning: 'tool';
 		error?: undefined;
+		startedAt?: number;
 		llmInfo?: undefined;
 		toolInfo: {
 			toolName: ToolName;
@@ -194,18 +220,21 @@ export type ThreadStreamState = {
 	} | {
 		isRunning: 'compressing';
 		error?: undefined;
+		startedAt?: number;
 		llmInfo?: undefined;
 		toolInfo?: undefined;
 		interrupt?: undefined;
 	} | {
 		isRunning: 'awaiting_user';
 		error?: undefined;
+		startedAt?: number;
 		llmInfo?: undefined;
 		toolInfo?: undefined;
 		interrupt?: undefined;
 	} | {
 		isRunning: 'idle';
 		error?: undefined;
+		startedAt?: number;
 		llmInfo?: undefined;
 		toolInfo?: undefined;
 		interrupt: 'not_needed' | Promise<() => void>; // calling this should have no effect on state - would be too confusing. it just cancels the tool
@@ -533,6 +562,12 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 			this._pendingLLMStreamState.delete(threadId)
 			this._llmStreamStateSchedulers.get(threadId)?.cancel()
 		}
+		if (state?.isRunning) {
+			state = {
+				...state,
+				startedAt: this.streamState[threadId]?.startedAt ?? Date.now(),
+			} as ThreadStreamState[string]
+		}
 		this.streamState[threadId] = state
 		this._onDidChangeStreamState.fire({ threadId })
 	}
@@ -578,6 +613,11 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 	private _swapOutLatestStreamingToolWithResult = (threadId: string, tool: ChatMessage & { role: 'tool' }) => {
 		const messages = this.state.allThreads[threadId]?.messages
 		if (!messages) return false
+		const existingToolIdx = messages.findIndex(m => m.role === 'tool' && m.id === tool.id && m.type !== 'invalid_params')
+		if (existingToolIdx !== -1) {
+			this._editMessageInThread(threadId, existingToolIdx, tool)
+			return true
+		}
 		const lastMsg = messages[messages.length - 1]
 		if (!lastMsg) return false
 
@@ -637,7 +677,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 		// add assistant message
 		if (this.streamState[threadId]?.isRunning === 'LLM') {
 			this._flushPendingLLMStreamState(threadId)
-			const { displayContentSoFar, reasoningSoFar, toolCallSoFar } = this.streamState[threadId]?.llmInfo ?? { displayContentSoFar: '', reasoningSoFar: '', toolCallSoFar: null }
+			const { displayContentSoFar, reasoningSoFar, toolCallSoFar } = this.streamState[threadId]?.llmInfo ?? { displayContentSoFar: '', reasoningSoFar: '', toolCallSoFar: null, toolCallsSoFar: null }
 			this._addMessageToThread(threadId, { role: 'aborted_assistant', displayContent: displayContentSoFar, reasoning: reasoningSoFar, anthropicReasoning: null })
 			if (toolCallSoFar) this._addMessageToThread(threadId, { role: 'interrupted_streaming_tool', name: toolCallSoFar.name, mcpServerName: this._computeMCPServerOfToolName(toolCallSoFar.name) })
 		}
@@ -682,6 +722,231 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 
 
 	// private readonly _currentlyRunningToolInterruptor: { [threadId: string]: (() => void) | undefined } = {}
+
+	private readonly _toolWriteLocks = new Map<string, Promise<void>>()
+	private _exclusiveToolWriteLock: Promise<void> = Promise.resolve()
+
+
+	private _canRunInReadonlyBatch(toolName: ToolName) {
+		return isABuiltinToolName(toolName) && parallelReadonlyBuiltinTools.has(toolName)
+	}
+
+	private _canRunInWriteBatch(toolName: ToolName) {
+		return isABuiltinToolName(toolName) && parallelWriteBuiltinTools.has(toolName)
+	}
+
+	private _writeLockKeysForToolCall(toolName: ToolName, toolParams: ToolCallParams<ToolName>): { type: 'keyed', keys: string[] } | { type: 'exclusive' } | null {
+		if (!isABuiltinToolName(toolName)) return null
+		if (toolName === 'delete_file_or_folder') return { type: 'exclusive' }
+		if (toolName === 'edit_file' || toolName === 'rewrite_file') {
+			const { uri } = toolParams as BuiltinToolCallParams['edit_file'] | BuiltinToolCallParams['rewrite_file']
+			return { type: 'keyed', keys: [`file:${uri.toString()}`] }
+		}
+		if (toolName === 'create_file_or_folder') {
+			const { uri } = toolParams as BuiltinToolCallParams['create_file_or_folder']
+			return { type: 'keyed', keys: [`dir:${dirname(uri).toString()}`] }
+		}
+		return null
+	}
+
+	private async _withToolWriteLocks<T>(keys: string[], fn: () => Promise<T>): Promise<T> {
+		await this._exclusiveToolWriteLock
+
+		const sortedKeys = [...new Set(keys)].sort()
+		const acquire = async (idx: number): Promise<T> => {
+			if (idx >= sortedKeys.length) return fn()
+
+			const key = sortedKeys[idx]
+			const previous = this._toolWriteLocks.get(key) ?? Promise.resolve()
+			let release: () => void = () => { }
+			const current = previous.then(() => new Promise<void>(res => { release = res }))
+			this._toolWriteLocks.set(key, current)
+
+			await previous
+			try {
+				return await acquire(idx + 1)
+			}
+			finally {
+				release()
+				if (this._toolWriteLocks.get(key) === current) {
+					this._toolWriteLocks.delete(key)
+				}
+			}
+		}
+
+		return acquire(0)
+	}
+
+	private async _withExclusiveToolWriteLock<T>(fn: () => Promise<T>): Promise<T> {
+		const previousExclusive = this._exclusiveToolWriteLock
+		let releaseExclusive: () => void = () => { }
+		const currentExclusive = previousExclusive.then(() => new Promise<void>(res => { releaseExclusive = res }))
+		this._exclusiveToolWriteLock = currentExclusive
+
+		await previousExclusive
+		await Promise.all([...this._toolWriteLocks.values()])
+
+		try {
+			return await fn()
+		}
+		finally {
+			releaseExclusive()
+			if (this._exclusiveToolWriteLock === currentExclusive) {
+				this._exclusiveToolWriteLock = Promise.resolve()
+			}
+		}
+	}
+
+	private async _withToolExecutionLock<T>(toolName: ToolName, toolParams: ToolCallParams<ToolName>, fn: () => Promise<T>): Promise<T> {
+		const lockMode = this._writeLockKeysForToolCall(toolName, toolParams)
+		if (!lockMode) return fn()
+		if (lockMode.type === 'exclusive') return this._withExclusiveToolWriteLock(fn)
+		return this._withToolWriteLocks(lockMode.keys, fn)
+	}
+
+	private _runReadonlyToolBatch = async (
+		threadId: string,
+		toolCalls: RawToolCallObj[],
+	): Promise<{ interrupted?: boolean }> => {
+		const results = await Promise.all(toolCalls.map(toolCall => (
+			this._runToolCall(threadId, toolCall.name, toolCall.id, undefined, {
+				preapproved: false,
+				unvalidatedToolParams: toolCall.rawParams,
+			})
+		)))
+		return { interrupted: results.some(result => result.interrupted) }
+	}
+
+	private _startReadonlyToolCallEarly = (toolCall: RawToolCallObj): EarlyReadonlyToolRun => {
+		const earlyRun: EarlyReadonlyToolRun = {
+			toolCall,
+			promise: Promise.resolve(null as any),
+			interruptTool: undefined,
+		}
+		earlyRun.promise = (async () => {
+			const toolName = toolCall.name
+			if (!this._canRunInReadonlyBatch(toolName) || !isABuiltinToolName(toolName)) {
+				return { role: 'tool', type: 'tool_error', params: toolCall.rawParams, result: `Tool ${toolName} cannot be started early.`, name: toolName, content: `Tool ${toolName} cannot be started early.`, id: toolCall.id, rawParams: toolCall.rawParams, mcpServerName: undefined } as ChatMessage & { role: 'tool' }
+			}
+
+			let toolParams: ToolCallParams<ToolName>
+			try {
+				toolParams = this._toolsService.validateParams[toolName](toolCall.rawParams) as ToolCallParams<ToolName>
+			}
+			catch (error) {
+				const errorMessage = getErrorMessage(error)
+				return { role: 'tool', type: 'invalid_params', rawParams: toolCall.rawParams, result: null, name: toolName, content: errorMessage, id: toolCall.id, mcpServerName: undefined } as ChatMessage & { role: 'tool' }
+			}
+
+			try {
+				const runningTool = await this._toolsService.callTool[toolName](toolParams as any)
+				earlyRun.interruptTool = runningTool.interruptTool
+				const toolResult = await runningTool.result
+				const toolResultStr = this._toolsService.stringOfResult[toolName](toolParams as any, toolResult as any)
+				return { role: 'tool', type: 'success', params: toolParams, result: toolResult, name: toolName, content: toolResultStr, id: toolCall.id, rawParams: toolCall.rawParams, mcpServerName: undefined } as ChatMessage & { role: 'tool' }
+			}
+			catch (error) {
+				const errorMessage = getErrorMessage(error)
+				return { role: 'tool', type: 'tool_error', params: toolParams, result: errorMessage, name: toolName, content: errorMessage, id: toolCall.id, rawParams: toolCall.rawParams, mcpServerName: undefined } as ChatMessage & { role: 'tool' }
+			}
+		})()
+		return earlyRun
+	}
+
+	private _startEarlyReadonlyToolCalls = (toolCalls: RawToolCallObj[] | undefined, earlyRuns: Map<string, EarlyReadonlyToolRun>) => {
+		if (!this._settingsService.state.globalSettings.parallelReadonlyTools) return
+		if (!toolCalls) return
+
+		for (const toolCall of toolCalls) {
+			if (!toolCall.isDone || !this._canRunInReadonlyBatch(toolCall.name)) return
+			if (!earlyRuns.has(toolCall.id)) {
+				earlyRuns.set(toolCall.id, this._startReadonlyToolCallEarly(toolCall))
+			}
+		}
+	}
+
+	private _interruptEarlyReadonlyToolCalls = (earlyRuns: Map<string, EarlyReadonlyToolRun>) => {
+		for (const earlyRun of earlyRuns.values()) {
+			earlyRun.interruptTool?.()
+		}
+	}
+
+	private _runWriteToolBatch = async (
+		threadId: string,
+		toolCalls: RawToolCallObj[],
+	): Promise<{ interrupted?: boolean, awaitingUserApproval?: boolean }> => {
+		const results = await Promise.all(toolCalls.map(toolCall => (
+			this._runToolCall(threadId, toolCall.name, toolCall.id, undefined, {
+				preapproved: false,
+				unvalidatedToolParams: toolCall.rawParams,
+			})
+		)))
+		return {
+			interrupted: results.some(result => result.interrupted),
+			awaitingUserApproval: results.some(result => result.awaitingUserApproval),
+		}
+	}
+
+	private _runToolCallsInOrder = async (
+		threadId: string,
+		toolCalls: RawToolCallObj[],
+		earlyRuns: Map<string, EarlyReadonlyToolRun>,
+	): Promise<{ interrupted?: boolean, awaitingUserApproval?: boolean, shouldSendAnotherMessage?: boolean }> => {
+		const mcpTools = this._mcpService.getMCPTools()
+		const useReadonlyBatch = this._settingsService.state.globalSettings.parallelReadonlyTools
+		const useWriteBatch = this._settingsService.state.globalSettings.parallelWriteTools && !!this._settingsService.state.globalSettings.autoApprove.edits
+		let shouldSendAnotherMessage = false
+
+		for (let i = 0; i < toolCalls.length;) {
+			const earlyRun = earlyRuns.get(toolCalls[i].id)
+			if (earlyRun) {
+				const toolMessage = await earlyRun.promise
+				this._addMessageToThread(threadId, toolMessage)
+				if (toolMessage.type === 'success') shouldSendAnotherMessage = true
+				i += 1
+				continue
+			}
+
+			if (useReadonlyBatch && this._canRunInReadonlyBatch(toolCalls[i].name)) {
+				const batch: RawToolCallObj[] = []
+				while (i + batch.length < toolCalls.length) {
+					const toolCall = toolCalls[i + batch.length]
+					if (earlyRuns.has(toolCall.id) || !this._canRunInReadonlyBatch(toolCall.name)) break
+					batch.push(toolCall)
+				}
+				const { interrupted } = await this._runReadonlyToolBatch(threadId, batch)
+				if (interrupted) return { interrupted: true }
+				shouldSendAnotherMessage = true
+				i += batch.length
+				continue
+			}
+
+			if (useWriteBatch && this._canRunInWriteBatch(toolCalls[i].name)) {
+				const batch: RawToolCallObj[] = []
+				while (i + batch.length < toolCalls.length) {
+					const toolCall = toolCalls[i + batch.length]
+					if (!this._canRunInWriteBatch(toolCall.name)) break
+					batch.push(toolCall)
+				}
+				const { awaitingUserApproval, interrupted } = await this._runWriteToolBatch(threadId, batch)
+				if (interrupted) return { interrupted: true }
+				if (awaitingUserApproval) return { awaitingUserApproval: true }
+				shouldSendAnotherMessage = true
+				i += batch.length
+				continue
+			}
+
+			const toolCall = toolCalls[i]
+			const mcpTool = mcpTools?.find(t => t.name === toolCall.name)
+			const { awaitingUserApproval, interrupted } = await this._runToolCall(threadId, toolCall.name, toolCall.id, mcpTool?.mcpServerName, { preapproved: false, unvalidatedToolParams: toolCall.rawParams })
+			if (interrupted) return { interrupted: true }
+			if (awaitingUserApproval) return { awaitingUserApproval: true }
+			shouldSendAnotherMessage = true
+			i += 1
+		}
+
+		return { shouldSendAnotherMessage }
+	}
 
 
 	// returns true when the tool call is waiting for user approval
@@ -762,28 +1027,37 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 				interruptTool?.()
 			})
 
-			if (isBuiltInTool) {
-				const toolCall = await this._toolsService.callTool[toolName](toolParams as any)
-				interruptTool = toolCall.interruptTool
+			const runTool = async () => {
+				if (interrupted) return undefined
+				if (isBuiltInTool) {
+					const toolCall = await this._toolsService.callTool[toolName](toolParams as any)
+					interruptTool = toolCall.interruptTool
 
-				if (interrupted) {
-					interruptTool?.()
-					return { interrupted: true }
+					if (interrupted) {
+						interruptTool?.()
+						return undefined
+					}
+
+					return await toolCall.result
 				}
+				else {
+					const mcpTools = this._mcpService.getMCPTools()
+					const mcpTool = mcpTools?.find(t => t.name === toolName)
+					if (!mcpTool) { throw new Error(`MCP tool ${toolName} not found`) }
 
-				toolResult = await toolCall.result
+					return (await this._mcpService.callMCPTool({
+						serverName: mcpTool.mcpServerName ?? 'unknown_mcp_server',
+						toolName: toolName,
+						params: toolParams
+					})).result
+				}
 			}
-			else {
-				const mcpTools = this._mcpService.getMCPTools()
-				const mcpTool = mcpTools?.find(t => t.name === toolName)
-				if (!mcpTool) { throw new Error(`MCP tool ${toolName} not found`) }
 
-				toolResult = (await this._mcpService.callMCPTool({
-					serverName: mcpTool.mcpServerName ?? 'unknown_mcp_server',
-					toolName: toolName,
-					params: toolParams
-				})).result
+			const lockedToolResult = await this._withToolExecutionLock(toolName, toolParams, runTool)
+			if (lockedToolResult === undefined && interrupted) {
+				return { interrupted: true }
 			}
+			toolResult = lockedToolResult as ToolResult<ToolName>
 
 			if (interrupted) { return { interrupted: true } } // the tool result is added where we interrupt, not here
 		}
@@ -848,6 +1122,8 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 		let nMessagesSent = 0
 		let shouldSendAnotherMessage = true
 		let isRunningWhenEnd: IsRunningType = undefined
+		const agentRunStartedAt = Date.now()
+		const elapsedMs = () => Date.now() - agentRunStartedAt
 
 		// before enter loop, call tool
 		if (callThisToolFirst) {
@@ -924,12 +1200,13 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 				nAttempts += 1
 
 				type ResTypes =
-					| { type: 'llmDone', toolCall?: RawToolCallObj, info: { fullText: string, fullReasoning: string, anthropicReasoning: AnthropicReasoning[] | null } }
+					| { type: 'llmDone', toolCalls?: RawToolCallObj[], info: { fullText: string, fullReasoning: string, anthropicReasoning: AnthropicReasoning[] | null } }
 					| { type: 'llmError', error?: { message: string; fullError: Error | null; } }
 					| { type: 'llmAborted' }
 
 				let resMessageIsDonePromise: (res: ResTypes) => void // resolves when user approves this tool use (or if tool doesn't require approval)
 				const messageIsDonePromise = new Promise<ResTypes>((res, rej) => { resMessageIsDonePromise = res })
+				const earlyReadonlyToolRuns = new Map<string, EarlyReadonlyToolRun>()
 
 				const llmCancelToken = this._llmMessageService.sendLLMMessage({
 					messagesType: 'chatMessages',
@@ -940,20 +1217,24 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 					overridesOfModel,
 					logging: { loggingName: `Chat - ${chatMode}`, loggingExtras: { threadId, nMessagesSent, chatMode } },
 					separateSystemMessage: separateSystemMessage,
-					onText: ({ fullText, fullReasoning, toolCall }) => {
+					onText: ({ fullText, fullReasoning, toolCall, toolCalls }) => {
+						this._startEarlyReadonlyToolCalls(toolCalls, earlyReadonlyToolRuns)
 						this._scheduleLLMStreamState(
 							threadId,
-							{ displayContentSoFar: fullText, reasoningSoFar: fullReasoning, toolCallSoFar: toolCall ?? null },
+							{ displayContentSoFar: fullText, reasoningSoFar: fullReasoning, toolCallSoFar: toolCall ?? toolCalls?.[0] ?? null, toolCallsSoFar: toolCalls ?? (toolCall ? [toolCall] : null) },
 							Promise.resolve(() => { if (llmCancelToken) this._llmMessageService.abort(llmCancelToken) })
 						)
 					},
-					onFinalMessage: async ({ fullText, fullReasoning, toolCall, anthropicReasoning, }) => {
-						resMessageIsDonePromise({ type: 'llmDone', toolCall, info: { fullText, fullReasoning, anthropicReasoning } }) // resolve with tool calls
+					onFinalMessage: async ({ fullText, fullReasoning, toolCall, toolCalls, anthropicReasoning, }) => {
+						const normalizedToolCalls = toolCalls ?? (toolCall ? [toolCall] : undefined)
+						resMessageIsDonePromise({ type: 'llmDone', toolCalls: normalizedToolCalls, info: { fullText, fullReasoning, anthropicReasoning } }) // resolve with tool calls
 					},
 					onError: async (error) => {
+						this._interruptEarlyReadonlyToolCalls(earlyReadonlyToolRuns)
 						resMessageIsDonePromise({ type: 'llmError', error: error })
 					},
 					onAbort: () => {
+						this._interruptEarlyReadonlyToolCalls(earlyReadonlyToolRuns)
 						// stop the loop to free up the promise, but don't modify state (already handled by whatever stopped it)
 						resMessageIsDonePromise({ type: 'llmAborted' })
 						this._metricsService.capture('Agent Loop Done (Aborted)', { nMessagesSent, chatMode })
@@ -966,7 +1247,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 					break
 				}
 
-				this._setStreamState(threadId, { isRunning: 'LLM', llmInfo: { displayContentSoFar: '', reasoningSoFar: '', toolCallSoFar: null }, interrupt: Promise.resolve(() => this._llmMessageService.abort(llmCancelToken)) })
+				this._setStreamState(threadId, { isRunning: 'LLM', llmInfo: { displayContentSoFar: '', reasoningSoFar: '', toolCallSoFar: null, toolCallsSoFar: null }, interrupt: Promise.resolve(() => this._llmMessageService.abort(llmCancelToken)) })
 				const llmRes = await messageIsDonePromise // wait for message to complete
 
 				// if something else started running in the meantime
@@ -999,7 +1280,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 						const { error } = llmRes
 						this._flushPendingLLMStreamState(threadId)
 						const { displayContentSoFar, reasoningSoFar, toolCallSoFar } = this.streamState[threadId].llmInfo
-						this._addMessageToThread(threadId, { role: 'assistant', displayContent: displayContentSoFar, reasoning: reasoningSoFar, anthropicReasoning: null })
+						this._addMessageToThread(threadId, { role: 'assistant', displayContent: displayContentSoFar, reasoning: reasoningSoFar, elapsedMs: elapsedMs(), anthropicReasoning: null })
 						if (toolCallSoFar) this._addMessageToThread(threadId, { role: 'interrupted_streaming_tool', name: toolCallSoFar.name, mcpServerName: this._computeMCPServerOfToolName(toolCallSoFar.name) })
 
 						this._setStreamState(threadId, { isRunning: undefined, error })
@@ -1009,26 +1290,26 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 				}
 
 				// llm res success
-				const { toolCall, info } = llmRes
+				const { toolCalls, info } = llmRes
 
-				this._addMessageToThread(threadId, { role: 'assistant', displayContent: info.fullText, reasoning: info.fullReasoning, anthropicReasoning: info.anthropicReasoning })
+				this._addMessageToThread(threadId, { role: 'assistant', displayContent: info.fullText, reasoning: info.fullReasoning, elapsedMs: elapsedMs(), anthropicReasoning: info.anthropicReasoning })
 
 				this._setStreamState(threadId, { isRunning: 'idle', interrupt: 'not_needed' }) // just decorative for clarity
 
 				// call tool if there is one
-				if (toolCall) {
-					const mcpTools = this._mcpService.getMCPTools()
-					const mcpTool = mcpTools?.find(t => t.name === toolCall.name)
-
-					const { awaitingUserApproval, interrupted } = await this._runToolCall(threadId, toolCall.name, toolCall.id, mcpTool?.mcpServerName, { preapproved: false, unvalidatedToolParams: toolCall.rawParams })
+				if (toolCalls && toolCalls.length > 0) {
+					const { awaitingUserApproval, interrupted, shouldSendAnotherMessage: shouldContinue } = await this._runToolCallsInOrder(threadId, toolCalls, earlyReadonlyToolRuns)
 					if (interrupted) {
 						this._setStreamState(threadId, undefined)
 						return
 					}
 					if (awaitingUserApproval) { isRunningWhenEnd = 'awaiting_user' }
-					else { shouldSendAnotherMessage = true }
+					else { shouldSendAnotherMessage = !!shouldContinue }
 
 					this._setStreamState(threadId, { isRunning: 'idle', interrupt: 'not_needed' }) // just decorative, for clarity
+				}
+				else {
+					this._interruptEarlyReadonlyToolCalls(earlyReadonlyToolRuns)
 				}
 
 			} // end while (attempts)
