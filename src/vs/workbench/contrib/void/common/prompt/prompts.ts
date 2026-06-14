@@ -256,11 +256,136 @@ export const builtinTools: {
 		}
 	},
 
+	read_symbol: {
+		name: 'read_symbol',
+		description: `Finds likely definitions and important mentions of a symbol using workspace text search. Use this before editing code that depends on a function, class, type, or variable.`,
+		params: {
+			symbol: { description: 'The exact symbol name to search for.' },
+			search_in_folder: { description: 'Optional. Search descendants of this folder only.' },
+			...paginationParam,
+		},
+	},
+
+	find_references: {
+		name: 'find_references',
+		description: `Finds workspace references to a symbol using text search. Use this to estimate blast radius before refactors.`,
+		params: {
+			symbol: { description: 'The exact symbol name to search for.' },
+			search_in_folder: { description: 'Optional. Search descendants of this folder only.' },
+			...paginationParam,
+		},
+	},
+
+	go_to_definition: {
+		name: 'go_to_definition',
+		description: `Finds likely definition locations for a symbol using language-like text patterns. Prefer this before opening many unrelated files.`,
+		params: {
+			symbol: { description: 'The exact symbol name to find.' },
+			search_in_folder: { description: 'Optional. Search descendants of this folder only.' },
+			...paginationParam,
+		},
+	},
+
 	read_lint_errors: {
 		name: 'read_lint_errors',
 		description: `Use this tool to view all the lint errors on a file.`,
 		params: {
 			...uriParam('file'),
+		},
+	},
+
+	git_status: {
+		name: 'git_status',
+		description: `Returns the current git status in porcelain format plus the current branch. Use this before summarizing changes or deciding what needs verification.`,
+		params: {
+			cwd: { description: cwdHelper },
+		},
+	},
+
+	git_diff: {
+		name: 'git_diff',
+		description: `Returns the current git diff. Use this after edits to review exactly what changed before summarizing or committing.`,
+		params: {
+			cwd: { description: cwdHelper },
+			staged: { description: 'Optional. Set true to inspect staged changes only. Default is false.' },
+		},
+	},
+
+	git_apply_patch: {
+		name: 'git_apply_patch',
+		description: `Applies a unified diff patch through git apply. Use only for candidate patches or patch artifacts; prefer edit_file/rewrite_file for normal source edits.`,
+		params: {
+			cwd: { description: cwdHelper },
+			patch: { description: 'The complete unified diff patch text.' },
+			check_only: { description: 'Optional. Set true to validate without applying. Default is false.' },
+		},
+	},
+
+	git_create_branch: {
+		name: 'git_create_branch',
+		description: `Creates and checks out a git branch for an isolated task branch.`,
+		params: {
+			cwd: { description: cwdHelper },
+			branch_name: { description: 'The branch name to create and check out.' },
+			base_ref: { description: 'Optional. Git ref to create the branch from. Defaults to current HEAD.' },
+		},
+	},
+
+	git_commit: {
+		name: 'git_commit',
+		description: `Creates a git commit after the user has approved the changes. Use git_status and git_diff first.`,
+		params: {
+			cwd: { description: cwdHelper },
+			message: { description: 'The commit message.' },
+			all: { description: 'Optional. Set true to stage modified/deleted tracked files with git commit -am. Default is false.' },
+		},
+	},
+
+	git_worktree_create: {
+		name: 'git_worktree_create',
+		description: `Creates an isolated git worktree for a candidate patch. Use this when exploring an implementation path that should not directly modify the main workspace.`,
+		params: {
+			cwd: { description: cwdHelper },
+			path: { description: 'Optional. Relative or absolute destination path for the worktree. Defaults to .void/worktrees/<run id>.' },
+			branch_name: { description: 'Optional. Branch name for the candidate worktree. Defaults to void/<run id>.' },
+			base_ref: { description: 'Optional. Git ref to branch from. Defaults to the current HEAD.' },
+		},
+	},
+
+	git_worktree_delete: {
+		name: 'git_worktree_delete',
+		description: `Removes an isolated git worktree after a candidate patch is discarded or merged.`,
+		params: {
+			cwd: { description: cwdHelper },
+			path: { description: 'The relative or absolute worktree path to remove.' },
+			prune: { description: 'Optional. Set true to run git worktree prune after removing. Default is true.' },
+		},
+	},
+
+	package_script_list: {
+		name: 'package_script_list',
+		description: `Lists scripts from package.json so you can choose the right test, lint, build, or typecheck command.`,
+		params: {
+			cwd: { description: cwdHelper },
+		},
+	},
+
+	subagent_review: {
+		name: 'subagent_review',
+		description: `Runs a read-only review lane over the current workspace state. It collects git status, diff stats, whitespace checks, and optionally the full diff for risk review without editing files.`,
+		params: {
+			cwd: { description: cwdHelper },
+			goal: { description: 'The review focus, such as "check regression risk before commit".' },
+			include_diff: { description: 'Optional. Include the full git diff in the review snapshot. Default is true.' },
+		},
+	},
+
+	read_test_failures: {
+		name: 'read_test_failures',
+		description: `Extracts likely failure snippets from a test, lint, build, or typecheck output. Use this after run_tests when the output is long or noisy.`,
+		params: {
+			output: { description: 'The raw output returned by run_tests or another verification command.' },
+			max_items: { description: 'Optional. Maximum number of failure snippets to return. Default is 8.' },
 		},
 	},
 
@@ -305,6 +430,24 @@ export const builtinTools: {
 		description: `Runs a terminal command and waits for the result (times out after ${MAX_TERMINAL_INACTIVE_TIME}s of inactivity or ${MAX_TERMINAL_TOTAL_TIME}s total wait time). ${terminalDescHelper}`,
 		params: {
 			command: { description: 'The terminal command to run.' },
+			cwd: { description: cwdHelper },
+		},
+	},
+
+	run_tests: {
+		name: 'run_tests',
+		description: `Runs a targeted test, lint, build, or typecheck command and waits for the result. Prefer the smallest verification command that matches the files changed.`,
+		params: {
+			command: { description: 'The test, lint, build, or typecheck command to run.' },
+			cwd: { description: cwdHelper },
+		},
+	},
+
+	install_dependencies: {
+		name: 'install_dependencies',
+		description: `Runs a package manager install command when dependencies are missing. This requires approval and should be used only after inspecting package metadata or an install error.`,
+		params: {
+			command: { description: 'The install command to run, such as npm install, pnpm install, yarn install, or pip install -r requirements.txt.' },
 			cwd: { description: cwdHelper },
 		},
 	},

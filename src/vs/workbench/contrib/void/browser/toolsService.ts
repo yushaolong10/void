@@ -19,6 +19,11 @@ import { MAX_CHILDREN_URIs_PAGE, MAX_FILE_CHARS_PAGE, MAX_TERMINAL_BG_COMMAND_TI
 import { IVoidSettingsService } from '../common/voidSettingsService.js'
 import { generateUuid } from '../../../../base/common/uuid.js'
 import { extractSearchReplaceBlocks } from '../common/helpers/extractCodeFromResult.js'
+import { IBrowserAgentBridge, createLegacyToolInvocation } from './agent/BrowserAgentBridge.js'
+import { ToolRisk } from '../common/agent/tools/ToolDefinition.js'
+import { SubagentManager } from '../common/agent/execution/SubagentManager.js'
+import { WorktreeManager } from '../common/agent/execution/WorktreeManager.js'
+import { safeStringify } from '../common/agent/tools/safeSerialize.js'
 
 
 // tool use for AI
@@ -40,7 +45,7 @@ const stripTrailingXMLArtifacts = (value: string) => {
 
 const validateStr = (argName: string, value: unknown) => {
 	if (value === null) throw new Error(`Invalid LLM output: ${argName} was null.`)
-	if (typeof value !== 'string') throw new Error(`Invalid LLM output format: ${argName} must be a string, but its type is "${typeof value}". Full value: ${JSON.stringify(value)}.`)
+	if (typeof value !== 'string') throw new Error(`Invalid LLM output format: ${argName} must be a string, but its type is "${typeof value}". Full value: ${safeStringify(value)}.`)
 	return stripTrailingXMLArtifacts(value)
 }
 
@@ -48,7 +53,7 @@ const validateStr = (argName: string, value: unknown) => {
 // We are NOT checking to make sure in workspace
 const validateURI = (uriStr: unknown) => {
 	if (uriStr === null) throw new Error(`Invalid LLM output: uri was null.`)
-	if (typeof uriStr !== 'string') throw new Error(`Invalid LLM output format: Provided uri must be a string, but it's a(n) ${typeof uriStr}. Full value: ${JSON.stringify(uriStr)}.`)
+	if (typeof uriStr !== 'string') throw new Error(`Invalid LLM output format: Provided uri must be a string, but it's a(n) ${typeof uriStr}. Full value: ${safeStringify(uriStr)}.`)
 	const cleanedUriStr = stripTrailingXMLArtifacts(uriStr)
 
 	// Check if it's already a full URI with scheme (e.g., vscode-remote://, file://, etc.)
@@ -125,6 +130,40 @@ const validateBoolean = (b: unknown, opts: { default: boolean }) => {
 	return opts.default
 }
 
+const sanitizeGitRefSegment = (value: string) => {
+	return value.replace(/[^a-zA-Z0-9._/-]/g, '-').replace(/\/+/g, '/').replace(/^-+|-+$/g, '')
+}
+
+const shellQuote = (value: string) => {
+	return `'${value.replace(/'/g, `'\\''`)}'`
+}
+
+const dirnameForShell = (value: string) => {
+	const normalized = value.replace(/\/+$/, '')
+	const lastSlash = normalized.lastIndexOf('/')
+	if (lastSlash < 0) return '.'
+	if (lastSlash === 0) return '/'
+	return normalized.slice(0, lastSlash)
+}
+
+const extractTestFailureSnippets = (output: string, maxItems: number) => {
+	const lines = output.split(/\r?\n/)
+	const interesting = /(fail|failed|failure|error|exception|assert|expected|received|actual|panic|traceback|ts\d{4}|eslint|jest|vitest|mocha|pytest|cargo test)/i
+	const snippets: string[] = []
+	const seen = new Set<string>()
+	for (let i = 0; i < lines.length; i++) {
+		if (!interesting.test(lines[i])) continue
+		const start = Math.max(0, i - 3)
+		const end = Math.min(lines.length, i + 8)
+		const snippet = lines.slice(start, end).join('\n').trim()
+		if (!snippet || seen.has(snippet)) continue
+		seen.add(snippet)
+		snippets.push(snippet)
+		if (snippets.length >= maxItems) break
+	}
+	return snippets
+}
+
 
 const checkIfIsFolder = (uriStr: string) => {
 	uriStr = uriStr.trim()
@@ -148,6 +187,8 @@ export class ToolsService implements IToolsService {
 	public validateParams: ValidateBuiltinParams;
 	public callTool: CallBuiltinTool;
 	public stringOfResult: BuiltinToolResultToString;
+	private readonly subagentManager = new SubagentManager();
+	private readonly worktreeManager = new WorktreeManager();
 
 	constructor(
 		@IFileService fileService: IFileService,
@@ -161,6 +202,7 @@ export class ToolsService implements IToolsService {
 		@IDirectoryStrService private readonly directoryStrService: IDirectoryStrService,
 		@IMarkerService private readonly markerService: IMarkerService,
 		@IVoidSettingsService private readonly voidSettingsService: IVoidSettingsService,
+		@IBrowserAgentBridge private readonly agentBridge: IBrowserAgentBridge,
 	) {
 		const queryBuilder = instantiationService.createInstance(QueryBuilder);
 		const waitForMarkerSettle = async (uri: URI, { timeoutMs = 1000, settleMs = 100 } = {}) => {
@@ -251,12 +293,113 @@ export class ToolsService implements IToolsService {
 				return { uri, query, isRegex };
 			},
 
+			read_symbol: (params: RawToolParamsObj) => {
+				const { symbol: symbolUnknown, search_in_folder: searchInFolderUnknown, page_number: pageNumberUnknown } = params
+				const symbol = validateStr('symbol', symbolUnknown)
+				const searchInFolder = validateOptionalURI(searchInFolderUnknown)
+				const pageNumber = validatePageNum(pageNumberUnknown)
+				return { symbol, searchInFolder, pageNumber }
+			},
+
+			find_references: (params: RawToolParamsObj) => {
+				const { symbol: symbolUnknown, search_in_folder: searchInFolderUnknown, page_number: pageNumberUnknown } = params
+				const symbol = validateStr('symbol', symbolUnknown)
+				const searchInFolder = validateOptionalURI(searchInFolderUnknown)
+				const pageNumber = validatePageNum(pageNumberUnknown)
+				return { symbol, searchInFolder, pageNumber }
+			},
+
+			go_to_definition: (params: RawToolParamsObj) => {
+				const { symbol: symbolUnknown, search_in_folder: searchInFolderUnknown, page_number: pageNumberUnknown } = params
+				const symbol = validateStr('symbol', symbolUnknown)
+				const searchInFolder = validateOptionalURI(searchInFolderUnknown)
+				const pageNumber = validatePageNum(pageNumberUnknown)
+				return { symbol, searchInFolder, pageNumber }
+			},
+
 			read_lint_errors: (params: RawToolParamsObj) => {
 				const {
 					uri: uriUnknown,
 				} = params
 				const uri = validateURI(uriUnknown)
 				return { uri }
+			},
+
+			git_status: (params: RawToolParamsObj) => {
+				const { cwd: cwdUnknown } = params
+				const cwd = validateOptionalStr('cwd', cwdUnknown)
+				return { cwd }
+			},
+
+			git_diff: (params: RawToolParamsObj) => {
+				const { cwd: cwdUnknown, staged: stagedUnknown } = params
+				const cwd = validateOptionalStr('cwd', cwdUnknown)
+				const staged = validateBoolean(stagedUnknown, { default: false })
+				return { cwd, staged }
+			},
+
+			git_apply_patch: (params: RawToolParamsObj) => {
+				const { cwd: cwdUnknown, patch: patchUnknown, check_only: checkOnlyUnknown } = params
+				const cwd = validateOptionalStr('cwd', cwdUnknown)
+				const patch = validateStr('patch', patchUnknown)
+				const checkOnly = validateBoolean(checkOnlyUnknown, { default: false })
+				return { cwd, patch, checkOnly }
+			},
+
+			git_create_branch: (params: RawToolParamsObj) => {
+				const { cwd: cwdUnknown, branch_name: branchNameUnknown, base_ref: baseRefUnknown } = params
+				const cwd = validateOptionalStr('cwd', cwdUnknown)
+				const branchName = sanitizeGitRefSegment(validateStr('branch_name', branchNameUnknown))
+				const baseRef = validateOptionalStr('base_ref', baseRefUnknown)
+				return { cwd, branchName, baseRef }
+			},
+
+			git_commit: (params: RawToolParamsObj) => {
+				const { cwd: cwdUnknown, message: messageUnknown, all: allUnknown } = params
+				const cwd = validateOptionalStr('cwd', cwdUnknown)
+				const message = validateStr('message', messageUnknown)
+				const all = validateBoolean(allUnknown, { default: false })
+				return { cwd, message, all }
+			},
+
+			git_worktree_create: (params: RawToolParamsObj) => {
+				const { cwd: cwdUnknown, path: pathUnknown, branch_name: branchNameUnknown, base_ref: baseRefUnknown } = params
+				const id = generateUuid().slice(0, 8)
+				const cwd = validateOptionalStr('cwd', cwdUnknown)
+				const path = validateOptionalStr('path', pathUnknown) ?? `.void/worktrees/${id}`
+				const rawBranchName = validateOptionalStr('branch_name', branchNameUnknown)
+				const branchName = rawBranchName ? sanitizeGitRefSegment(rawBranchName) : `void/${id}`
+				const baseRef = validateOptionalStr('base_ref', baseRefUnknown)
+				return { cwd, path, branchName, baseRef }
+			},
+
+			git_worktree_delete: (params: RawToolParamsObj) => {
+				const { cwd: cwdUnknown, path: pathUnknown, prune: pruneUnknown } = params
+				const cwd = validateOptionalStr('cwd', cwdUnknown)
+				const path = validateStr('path', pathUnknown)
+				const prune = validateBoolean(pruneUnknown, { default: true })
+				return { cwd, path, prune }
+			},
+
+			package_script_list: (params: RawToolParamsObj) => {
+				const { cwd: cwdUnknown } = params
+				const cwd = validateOptionalStr('cwd', cwdUnknown)
+				return { cwd }
+			},
+
+			subagent_review: (params: RawToolParamsObj) => {
+				const { cwd: cwdUnknown, goal: goalUnknown, include_diff: includeDiffUnknown } = params
+				const cwd = validateOptionalStr('cwd', cwdUnknown)
+				const goal = validateOptionalStr('goal', goalUnknown) ?? 'Review the current workspace changes for risk.'
+				const includeDiff = validateBoolean(includeDiffUnknown, { default: true })
+				return { cwd, goal, includeDiff }
+			},
+
+			read_test_failures: (params: RawToolParamsObj) => {
+				const { output: outputUnknown, max_items: maxItemsUnknown } = params
+				const output = validateStr('output', outputUnknown)
+				const maxItems = Math.max(1, Math.min(20, validateNumber(maxItemsUnknown, { default: 8 }) ?? 8))
+				return { output, maxItems }
 			},
 
 			// ---
@@ -300,6 +443,20 @@ export class ToolsService implements IToolsService {
 			// ---
 
 			run_command: (params: RawToolParamsObj) => {
+				const { command: commandUnknown, cwd: cwdUnknown } = params
+				const command = validateStr('command', commandUnknown)
+				const cwd = validateOptionalStr('cwd', cwdUnknown)
+				const terminalId = generateUuid()
+				return { command, cwd, terminalId }
+			},
+			run_tests: (params: RawToolParamsObj) => {
+				const { command: commandUnknown, cwd: cwdUnknown } = params
+				const command = validateStr('command', commandUnknown)
+				const cwd = validateOptionalStr('cwd', cwdUnknown)
+				const terminalId = generateUuid()
+				return { command, cwd, terminalId }
+			},
+			install_dependencies: (params: RawToolParamsObj) => {
 				const { command: commandUnknown, cwd: cwdUnknown } = params
 				const command = validateStr('command', commandUnknown)
 				const cwd = validateOptionalStr('cwd', cwdUnknown)
@@ -428,10 +585,152 @@ export class ToolsService implements IToolsService {
 				return { result: { lines } };
 			},
 
+			read_symbol: async ({ symbol, searchInFolder, pageNumber }) => {
+				const terminalId = generateUuid()
+				const from = (pageNumber - 1) * 100 + 1
+				const to = pageNumber * 100
+				const target = searchInFolder?.fsPath ?? '.'
+				const pattern = `\\b${symbol.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`
+				const command = `rg --line-number --column --context 2 ${shellQuote(pattern)} ${shellQuote(target)} | sed -n ${shellQuote(`${from},${to}p`)}`
+				const { resPromise, interrupt } = await this.terminalToolService.runCommand(command, { type: 'temporary', cwd: null, terminalId })
+				return { result: resPromise, interruptTool: interrupt }
+			},
+
+			find_references: async ({ symbol, searchInFolder, pageNumber }) => {
+				const terminalId = generateUuid()
+				const from = (pageNumber - 1) * 100 + 1
+				const to = pageNumber * 100
+				const target = searchInFolder?.fsPath ?? '.'
+				const pattern = `\\b${symbol.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`
+				const command = `rg --line-number --column ${shellQuote(pattern)} ${shellQuote(target)} | sed -n ${shellQuote(`${from},${to}p`)}`
+				const { resPromise, interrupt } = await this.terminalToolService.runCommand(command, { type: 'temporary', cwd: null, terminalId })
+				return { result: resPromise, interruptTool: interrupt }
+			},
+
+			go_to_definition: async ({ symbol, searchInFolder, pageNumber }) => {
+				const terminalId = generateUuid()
+				const from = (pageNumber - 1) * 100 + 1
+				const to = pageNumber * 100
+				const target = searchInFolder?.fsPath ?? '.'
+				const escaped = symbol.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+				const pattern = `(class|function|interface|type|enum|const|let|var|def|struct|trait)\\s+${escaped}\\b|${escaped}\\s*[:=]\\s*(async\\s*)?(function|class|\\()`
+				const command = `rg --line-number --column ${shellQuote(pattern)} ${shellQuote(target)} | sed -n ${shellQuote(`${from},${to}p`)}`
+				const { resPromise, interrupt } = await this.terminalToolService.runCommand(command, { type: 'temporary', cwd: null, terminalId })
+				return { result: resPromise, interruptTool: interrupt }
+			},
+
 			read_lint_errors: async ({ uri }) => {
 				await waitForMarkerSettle(uri)
 				const { lintErrors } = this._getLintErrors(uri)
 				return { result: { lintErrors } }
+			},
+
+			git_status: async ({ cwd }) => {
+				const terminalId = generateUuid()
+				const command = 'git branch --show-current && git status --short --branch'
+				const { resPromise, interrupt } = await this.terminalToolService.runCommand(command, { type: 'temporary', cwd, terminalId })
+				return { result: resPromise, interruptTool: interrupt }
+			},
+
+			git_diff: async ({ cwd, staged }) => {
+				const terminalId = generateUuid()
+				const command = staged ? 'git diff --staged --no-ext-diff --' : 'git diff --no-ext-diff --'
+				const { resPromise, interrupt } = await this.terminalToolService.runCommand(command, { type: 'temporary', cwd, terminalId })
+				return { result: resPromise, interruptTool: interrupt }
+			},
+
+			git_apply_patch: async ({ cwd, patch, checkOnly }) => {
+				const terminalId = generateUuid()
+				const command = `printf %s ${shellQuote(patch)} | git apply ${checkOnly ? '--check ' : ''}--whitespace=nowarn -`
+				const { resPromise, interrupt } = await this.terminalToolService.runCommand(command, { type: 'temporary', cwd, terminalId })
+				return { result: resPromise, interruptTool: interrupt }
+			},
+
+			git_create_branch: async ({ cwd, branchName, baseRef }) => {
+				const terminalId = generateUuid()
+				const command = `git checkout -b ${shellQuote(branchName)}${baseRef ? ` ${shellQuote(baseRef)}` : ''}`
+				const { resPromise, interrupt } = await this.terminalToolService.runCommand(command, { type: 'temporary', cwd, terminalId })
+				return { result: resPromise, interruptTool: interrupt }
+			},
+
+			git_commit: async ({ cwd, message, all }) => {
+				const terminalId = generateUuid()
+				const command = `git commit ${all ? '-am' : '-m'} ${shellQuote(message)}`
+				const { resPromise, interrupt } = await this.terminalToolService.runCommand(command, { type: 'temporary', cwd, terminalId })
+				return { result: resPromise, interruptTool: interrupt }
+			},
+
+			git_worktree_create: async ({ cwd, path, branchName, baseRef }) => {
+				const id = branchName.startsWith('void/') ? branchName.slice('void/'.length) : generateUuid().slice(0, 8)
+				this.worktreeManager.track({
+					id,
+					uri: URI.file(path),
+					branchName,
+					createdAt: Date.now(),
+					status: 'creating',
+				})
+				const terminalId = generateUuid()
+				const command = `mkdir -p ${shellQuote(dirnameForShell(path))} && git worktree add -b ${shellQuote(branchName)} ${shellQuote(path)}${baseRef ? ` ${shellQuote(baseRef)}` : ''}`
+				const { resPromise, interrupt } = await this.terminalToolService.runCommand(command, { type: 'temporary', cwd, terminalId })
+				const result = resPromise.then(result => {
+					this.worktreeManager.update(id, { status: result.resolveReason.type === 'done' && result.resolveReason.exitCode === 0 ? 'ready' : 'failed', error: result.resolveReason.type === 'done' && result.resolveReason.exitCode === 0 ? undefined : result.result })
+					return { id, path, branchName, ...result }
+				})
+				return { result, interruptTool: interrupt }
+			},
+
+			git_worktree_delete: async ({ cwd, path, prune }) => {
+				const terminalId = generateUuid()
+				const command = `git worktree remove ${shellQuote(path)}${prune ? ` && git worktree prune` : ''}`
+				const { resPromise, interrupt } = await this.terminalToolService.runCommand(command, { type: 'temporary', cwd, terminalId })
+				const result = resPromise.then(result => ({ path, ...result }))
+				return { result, interruptTool: interrupt }
+			},
+
+			package_script_list: async ({ cwd }) => {
+				const terminalId = generateUuid()
+				const command = `node -e "const fs=require('fs');const p='package.json';if(!fs.existsSync(p)){console.log('No package.json found in cwd.');process.exit(0)}const pkg=JSON.parse(fs.readFileSync(p,'utf8'));const scripts=pkg.scripts||{};for(const [k,v] of Object.entries(scripts)) console.log(k+': '+v)"`
+				const { resPromise, interrupt } = await this.terminalToolService.runCommand(command, { type: 'temporary', cwd, terminalId })
+				return { result: resPromise, interruptTool: interrupt }
+			},
+
+			subagent_review: async ({ cwd, goal, includeDiff }) => {
+				const id = generateUuid().slice(0, 8)
+				this.subagentManager.track({
+					id,
+					kind: 'review',
+					goal,
+					status: 'running',
+				})
+				const terminalId = generateUuid()
+				const command = [
+					`printf ${shellQuote(`Review goal: ${goal}\n\n`)}`,
+					`printf ${shellQuote('--- git status ---\n')}`,
+					`git status --short --branch`,
+					`printf ${shellQuote('\n--- diff stat ---\n')}`,
+					`git diff --stat --`,
+					`printf ${shellQuote('\n--- whitespace check ---\n')}`,
+					`git diff --check --`,
+					...(includeDiff ? [
+						`printf ${shellQuote('\n--- diff ---\n')}`,
+						`git diff --no-ext-diff --`,
+					] : []),
+				].join('; ')
+				const { resPromise, interrupt } = await this.terminalToolService.runCommand(command, { type: 'temporary', cwd, terminalId })
+				const result = resPromise.then(result => {
+					const ok = result.resolveReason.type === 'done' && result.resolveReason.exitCode === 0
+					this.subagentManager.update(id, {
+						status: ok ? 'complete' : 'failed',
+						summary: result.result.slice(0, 4000),
+					})
+					return { id, goal, ...result }
+				})
+				return { result, interruptTool: interrupt }
+			},
+
+			read_test_failures: async ({ output, maxItems }) => {
+				const failures = extractTestFailureSnippets(output, maxItems)
+				return { result: { failures } }
 			},
 
 			// ---
@@ -490,6 +789,14 @@ export class ToolsService implements IToolsService {
 				const { resPromise, interrupt } = await this.terminalToolService.runCommand(command, { type: 'temporary', cwd, terminalId })
 				return { result: resPromise, interruptTool: interrupt }
 			},
+			run_tests: async ({ command, cwd, terminalId }) => {
+				const { resPromise, interrupt } = await this.terminalToolService.runCommand(command, { type: 'temporary', cwd, terminalId })
+				return { result: resPromise, interruptTool: interrupt }
+			},
+			install_dependencies: async ({ command, cwd, terminalId }) => {
+				const { resPromise, interrupt } = await this.terminalToolService.runCommand(command, { type: 'temporary', cwd, terminalId })
+				return { result: resPromise, interruptTool: interrupt }
+			},
 			run_persistent_command: async ({ command, persistentTerminalId }) => {
 				const { resPromise, interrupt } = await this.terminalToolService.runCommand(command, { type: 'persistent', persistentTerminalId })
 				return { result: resPromise, interruptTool: interrupt }
@@ -505,6 +812,105 @@ export class ToolsService implements IToolsService {
 			},
 		}
 
+		const originalCallTool = { ...this.callTool } as CallBuiltinTool
+		const riskOfTool: { [T in BuiltinToolName]: ToolRisk } = {
+			read_file: 'read',
+			ls_dir: 'read',
+			get_dir_tree: 'read',
+			search_pathnames_only: 'read',
+			search_for_files: 'read',
+			search_in_file: 'read',
+			read_symbol: 'read',
+			find_references: 'read',
+			go_to_definition: 'read',
+			read_lint_errors: 'read',
+			git_status: 'read',
+			git_diff: 'read',
+			git_apply_patch: 'write',
+			git_create_branch: 'execute',
+			git_commit: 'execute',
+			git_worktree_create: 'execute',
+			git_worktree_delete: 'execute',
+			package_script_list: 'read',
+			subagent_review: 'read',
+			read_test_failures: 'read',
+			rewrite_file: 'write',
+			edit_file: 'write',
+			create_file_or_folder: 'write',
+			delete_file_or_folder: 'delete',
+			run_command: 'execute',
+			run_tests: 'execute',
+			install_dependencies: 'execute',
+			open_persistent_terminal: 'execute',
+			run_persistent_command: 'execute',
+			kill_persistent_terminal: 'execute',
+		}
+
+		for (const toolName of Object.keys(originalCallTool) as BuiltinToolName[]) {
+			this.agentBridge.runtime.tools.register({
+				name: toolName,
+				description: `Void built-in tool: ${toolName}`,
+				inputSchema: { type: 'object' },
+				risk: riskOfTool[toolName],
+				requiresApproval: async () => !!riskOfTool[toolName] && riskOfTool[toolName] !== 'read',
+				invoke: async input => {
+					const runningTool = await originalCallTool[toolName](input as any)
+					const result = await runningTool.result as Awaited<BuiltinToolResultType[typeof toolName]>
+					return {
+						ok: true,
+						data: result,
+						stdout: this.stringOfResult[toolName](input as any, result as any),
+						artifacts: toolName === 'git_worktree_create' && (result as any).path
+							? [{
+								kind: 'patch' as const,
+								title: `Candidate patch ${(result as any).branchName}`,
+								uri: (result as any).path,
+								data: result,
+							}]
+							: undefined,
+					}
+				},
+				renderResultForModel: output => output.stdout ?? output.stderr ?? safeStringify(output.data ?? ''),
+			})
+
+			this.callTool[toolName] = (async (params: any) => {
+				const currentToolContext = this.agentBridge.getCurrentToolContext()
+				const invocation = currentToolContext?.toolInvocation ?? createLegacyToolInvocation(toolName, params)
+				const ctx = this.agentBridge.recordToolStarted(invocation, currentToolContext)
+				try {
+					const runningTool = await originalCallTool[toolName](params)
+					const result = Promise.resolve(runningTool.result).then(
+						toolResult => {
+							this.agentBridge.recordToolFinished(invocation.callId, {
+								ok: true,
+								data: toolResult,
+								artifacts: toolName === 'git_worktree_create' && (toolResult as any).path
+									? [{
+										kind: 'patch' as const,
+										title: `Candidate patch ${(toolResult as any).branchName}`,
+										uri: (toolResult as any).path,
+										data: toolResult,
+									}]
+									: undefined,
+							}, ctx)
+							return toolResult
+						},
+						error => {
+							const message = error instanceof Error ? error.message : String(error)
+							this.agentBridge.recordToolFailed(invocation.callId, message, ctx)
+							throw error
+						},
+					)
+					return { result: result as any, interruptTool: runningTool.interruptTool }
+				}
+				catch (error) {
+					const message = error instanceof Error ? error.message : String(error)
+					this.agentBridge.recordToolFailed(invocation.callId, message, ctx)
+					throw error
+				}
+			}) as any
+		}
+
 
 		const nextPageStr = (hasNextPage: boolean) => hasNextPage ? '\n\n(more on next page...)' : ''
 		const verificationReminder = `\nNext step: verify this change before concluding. Prefer read_lint_errors for a quick check, then inspect the affected file or run a targeted command if needed.`
@@ -514,6 +920,23 @@ export class ToolsService implements IToolsService {
 				.map((e, i) => `Error ${i + 1}:\nLines Affected: ${e.startLineNumber}-${e.endLineNumber}\nError message:${e.message}`)
 				.join('\n\n')
 				.substring(0, MAX_FILE_CHARS_PAGE)
+		}
+
+		const stringifyTemporaryTerminalResult = (result: BuiltinToolResultType['run_command']) => {
+			const { resolveReason, result: result_, } = result
+			if (resolveReason.type === 'done') {
+				return `${result_}\n(exit code ${resolveReason.exitCode})`
+			}
+			if (resolveReason.type === 'idle_timeout') {
+				return `${result_}\nTerminal command ran, but was automatically killed by Void after ${MAX_TERMINAL_INACTIVE_TIME}s of inactivity and did not finish successfully. If this command may stay quiet before producing output, open a persistent terminal and run the command there instead.`
+			}
+			if (resolveReason.type === 'total_timeout') {
+				return `${result_}\nTerminal command ran for ${MAX_TERMINAL_TOTAL_TIME}s and did not finish successfully in the temporary terminal. For longer-running commands, open a persistent terminal and run the command there.`
+			}
+			if (resolveReason.type === 'aborted') {
+				return `${result_}\nCommand was aborted before completion.`
+			}
+			throw new Error(`Unexpected internal error: Terminal command did not resolve with a valid reason.`)
 		}
 
 		// given to the LLM after the call for successful tool calls
@@ -543,10 +966,50 @@ export class ToolsService implements IToolsService {
 				}).join('\n\n');
 				return lines;
 			},
+			read_symbol: (_params, result) => {
+				return stringifyTemporaryTerminalResult(result)
+			},
+			find_references: (_params, result) => {
+				return stringifyTemporaryTerminalResult(result)
+			},
+			go_to_definition: (_params, result) => {
+				return stringifyTemporaryTerminalResult(result)
+			},
 			read_lint_errors: (params, result) => {
 				return result.lintErrors ?
 					stringifyLintErrors(result.lintErrors)
 					: 'No lint errors found.'
+			},
+			git_status: (_params, result) => {
+				return stringifyTemporaryTerminalResult(result)
+			},
+			git_diff: (_params, result) => {
+				return stringifyTemporaryTerminalResult(result)
+			},
+			git_apply_patch: (_params, result) => {
+				return stringifyTemporaryTerminalResult(result)
+			},
+			git_create_branch: (_params, result) => {
+				return stringifyTemporaryTerminalResult(result)
+			},
+			git_commit: (_params, result) => {
+				return stringifyTemporaryTerminalResult(result)
+			},
+			git_worktree_create: (_params, result) => {
+				return `Created candidate worktree ${result.id}\nPath: ${result.path}\nBranch: ${result.branchName}\n${stringifyTemporaryTerminalResult(result)}`
+			},
+			git_worktree_delete: (_params, result) => {
+				return `Removed candidate worktree\nPath: ${result.path}\n${stringifyTemporaryTerminalResult(result)}`
+			},
+			package_script_list: (_params, result) => {
+				return stringifyTemporaryTerminalResult(result)
+			},
+			subagent_review: (_params, result) => {
+				return `Read-only review subagent ${result.id}\nGoal: ${result.goal}\n${stringifyTemporaryTerminalResult(result)}`
+			},
+			read_test_failures: (_params, result) => {
+				if (result.failures.length === 0) return 'No obvious test failures found in the provided output.'
+				return result.failures.map((failure, index) => `Failure ${index + 1}:\n${failure}`).join('\n\n')
 			},
 			// ---
 			create_file_or_folder: (params, result) => {
@@ -574,21 +1037,15 @@ export class ToolsService implements IToolsService {
 				return `Change successfully made to ${params.uri.fsPath}.${lintErrsString}${verificationReminder}`
 			},
 			run_command: (params, result) => {
-				const { resolveReason, result: result_, } = result
-				// success
-				if (resolveReason.type === 'done') {
-					return `${result_}\n(exit code ${resolveReason.exitCode})`
-				}
-				if (resolveReason.type === 'idle_timeout') {
-					return `${result_}\nTerminal command ran, but was automatically killed by Void after ${MAX_TERMINAL_INACTIVE_TIME}s of inactivity and did not finish successfully. If this command may stay quiet before producing output, open a persistent terminal and run the command there instead.`
-				}
-				if (resolveReason.type === 'total_timeout') {
-					return `${result_}\nTerminal command ran for ${MAX_TERMINAL_TOTAL_TIME}s and did not finish successfully in the temporary terminal. For longer-running commands, open a persistent terminal and run the command there.`
-				}
-				if (resolveReason.type === 'aborted') {
-					return `${result_}\nCommand was aborted before completion.`
-				}
-				throw new Error(`Unexpected internal error: Terminal command did not resolve with a valid reason.`)
+				return stringifyTemporaryTerminalResult(result)
+			},
+
+			run_tests: (_params, result) => {
+				return stringifyTemporaryTerminalResult(result)
+			},
+
+			install_dependencies: (_params, result) => {
+				return stringifyTemporaryTerminalResult(result)
 			},
 
 			run_persistent_command: (params, result) => {

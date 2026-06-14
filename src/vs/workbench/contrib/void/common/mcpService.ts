@@ -19,6 +19,7 @@ import { Event, Emitter } from '../../../../base/common/event.js';
 import { InternalToolInfo } from './prompt/prompts.js';
 import { IVoidSettingsService } from './voidSettingsService.js';
 import { MCPUserStateOfName } from './voidSettingsTypes.js';
+import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 
 
 type MCPServiceState = {
@@ -82,6 +83,7 @@ class MCPService extends Disposable implements IMCPService {
 		@IEditorService private readonly editorService: IEditorService,
 		@IMainProcessService private readonly mainProcessService: IMainProcessService,
 		@IVoidSettingsService private readonly voidSettingsService: IVoidSettingsService,
+		@IWorkspaceContextService private readonly workspaceContextService: IWorkspaceContextService,
 	) {
 		super();
 		this.channel = this.mainProcessService.getChannel('void-channel-mcp')
@@ -159,9 +161,13 @@ class MCPService extends Disposable implements IMCPService {
 		this._register(
 			this.fileService.watch(mcpConfigUri)
 		)
+		const workspaceMcpUris = this._getWorkspaceMCPConfigFilePaths();
+		for (const uri of workspaceMcpUris) {
+			this._register(this.fileService.watch(uri));
+		}
 
 		this._register(this.fileService.onDidFilesChange(async e => {
-			if (!e.contains(mcpConfigUri)) return
+			if (!e.contains(mcpConfigUri) && !workspaceMcpUris.some(uri => e.contains(uri))) return
 			await this._refreshMCPServers();
 		}));
 	}
@@ -230,6 +236,10 @@ class MCPService extends Disposable implements IMCPService {
 		return uri
 	}
 
+	private _getWorkspaceMCPConfigFilePaths(): URI[] {
+		return this.workspaceContextService.getWorkspace().folders.map(folder => URI.joinPath(folder.uri, '.mcp.json'));
+	}
+
 	private async _configFileExists(mcpConfigUri: URI): Promise<boolean> {
 		try {
 			await this.fileService.stat(mcpConfigUri);
@@ -243,13 +253,36 @@ class MCPService extends Disposable implements IMCPService {
 	private async _parseMCPConfigFile(): Promise<MCPConfigFileJSON | null> {
 		const mcpConfigUri = await this._getMCPConfigFilePath();
 		try {
-			const fileContent = await this.fileService.readFile(mcpConfigUri);
-			const contentString = fileContent.value.toString();
-			const configFileJson = JSON.parse(contentString);
-			if (!configFileJson.mcpServers) {
-				throw new Error('Missing mcpServers property');
+			const configs: MCPConfigFileJSON[] = [];
+			try {
+				const fileContent = await this.fileService.readFile(mcpConfigUri);
+				const contentString = fileContent.value.toString();
+				const configFileJson = JSON.parse(contentString);
+				if (!configFileJson.mcpServers) {
+					throw new Error('Missing mcpServers property');
+				}
+				configs.push(configFileJson as MCPConfigFileJSON);
 			}
-			return configFileJson as MCPConfigFileJSON;
+			catch (error) {
+				throw error;
+			}
+
+			for (const workspaceMcpUri of this._getWorkspaceMCPConfigFilePaths()) {
+				try {
+					const fileContent = await this.fileService.readFile(workspaceMcpUri);
+					const configFileJson = JSON.parse(fileContent.value.toString());
+					if (configFileJson.mcpServers) {
+						configs.push(configFileJson as MCPConfigFileJSON);
+					}
+				}
+				catch {
+					continue;
+				}
+			}
+
+			return {
+				mcpServers: Object.assign({}, ...configs.map(config => config.mcpServers)),
+			};
 		} catch (error) {
 			const fullError = `Error parsing MCP config file: ${error}`;
 			this._setHasError(fullError)

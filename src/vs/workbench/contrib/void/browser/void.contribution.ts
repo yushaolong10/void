@@ -31,11 +31,14 @@ import './media/void.css'
 // update (frontend part, also see platform/)
 import './voidUpdateActions.js'
 
-import './convertToLLMMessageWorkbenchContrib.js'
-
 // tools
-import './toolsService.js'
 import './terminalToolService.js'
+import './agent/BrowserAgentBridge.js'
+import './agent/AgentTimelineService.js'
+import './agent/AgentExtensionService.js'
+import './toolsService.js'
+
+import './convertToLLMMessageWorkbenchContrib.js'
 
 // register Thread History
 import './chatThreadService.js'
@@ -68,6 +71,7 @@ import './voidSCMService.js'
 
 // llmMessage
 import '../common/sendLLMMessageService.js'
+import '../common/mcpService.js'
 
 // voidSettings
 import '../common/voidSettingsService.js'

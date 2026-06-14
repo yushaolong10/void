@@ -54,6 +54,7 @@ import { IExtensionManagementService } from '../../../../../../../platform/exten
 import { IMCPService } from '../../../../common/mcpService.js';
 import { IStorageService, StorageScope } from '../../../../../../../platform/storage/common/storage.js'
 import { OPT_OUT_KEY } from '../../../../common/storageKeys.js'
+import { IAgentTimelineService } from '../../../agent/AgentTimelineService.js'
 
 
 // normally to do this you'd use a useEffect that calls .onDidChangeState(), but useEffect mounts too late and misses initial state changes
@@ -82,6 +83,7 @@ const commandBarURIStateListeners: Set<(uri: URI) => void> = new Set();
 const activeURIListeners: Set<(uri: URI | null) => void> = new Set();
 
 const mcpListeners: Set<() => void> = new Set()
+const agentTimelineListeners: Set<() => void> = new Set()
 
 
 // must call this before you can use any of the hooks below
@@ -101,9 +103,10 @@ export const _registerServices = (accessor: ServicesAccessor) => {
 		voidCommandBarService: accessor.get(IVoidCommandBarService),
 		modelService: accessor.get(IModelService),
 		mcpService: accessor.get(IMCPService),
+		agentTimelineService: accessor.get(IAgentTimelineService),
 	}
 
-	const { settingsStateService, chatThreadsStateService, refreshModelService, themeService, editCodeService, voidCommandBarService, modelService, mcpService } = stateServices
+	const { settingsStateService, chatThreadsStateService, refreshModelService, themeService, editCodeService, voidCommandBarService, modelService, mcpService, agentTimelineService } = stateServices
 
 
 
@@ -176,6 +179,12 @@ export const _registerServices = (accessor: ServicesAccessor) => {
 		})
 	)
 
+	disposables.push(
+		agentTimelineService.onDidAppendEvent(() => {
+			agentTimelineListeners.forEach(l => l())
+		})
+	)
+
 
 	return disposables
 }
@@ -224,11 +233,12 @@ const getReactAccessor = (accessor: ServicesAccessor) => {
 		IToolsService: accessor.get(IToolsService),
 		IConvertToLLMMessageService: accessor.get(IConvertToLLMMessageService),
 		ITerminalService: accessor.get(ITerminalService),
-		IExtensionManagementService: accessor.get(IExtensionManagementService),
-		IExtensionTransferService: accessor.get(IExtensionTransferService),
-		IMCPService: accessor.get(IMCPService),
+			IExtensionManagementService: accessor.get(IExtensionManagementService),
+			IExtensionTransferService: accessor.get(IExtensionTransferService),
+			IMCPService: accessor.get(IMCPService),
+			IAgentTimelineService: accessor.get(IAgentTimelineService),
 
-		IStorageService: accessor.get(IStorageService),
+			IStorageService: accessor.get(IStorageService),
 
 	} as const
 	return reactAccessor
@@ -422,6 +432,23 @@ export const useMCPServiceState = () => {
 		mcpListeners.add(listener);
 		return () => { mcpListeners.delete(listener) };
 	}, []);
+	return s
+}
+
+export const useAgentTimelineState = () => {
+	const accessor = useAccessor()
+	const agentTimelineService = accessor.get('IAgentTimelineService')
+	const [s, ss] = useState(() => ({
+		sessions: agentTimelineService.listSessions(),
+	}))
+	useEffect(() => {
+		const listener = () => {
+			ss({ sessions: agentTimelineService.listSessions() })
+		}
+		listener()
+		agentTimelineListeners.add(listener)
+		return () => { agentTimelineListeners.delete(listener) }
+	}, [agentTimelineService])
 	return s
 }
 

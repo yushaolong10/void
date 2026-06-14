@@ -40,6 +40,10 @@ import { IDirectoryStrService } from '../common/directoryStrService.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
 import { IMCPService } from '../common/mcpService.js';
 import { RawMCPToolCall } from '../common/mcpServiceTypes.js';
+import { IBrowserAgentBridge, createLegacyToolInvocation } from './agent/BrowserAgentBridge.js';
+import { AgentRun } from '../common/agent/runtime/AgentRun.js';
+import { ToolContext } from '../common/agent/tools/ToolDefinition.js';
+import { IAgentExtensionService } from './agent/AgentExtensionService.js';
 
 
 // related to retrying when LLM message has error
@@ -54,7 +58,15 @@ const parallelReadonlyBuiltinTools = new Set<string>([
 	'search_pathnames_only',
 	'search_for_files',
 	'search_in_file',
+	'read_symbol',
+	'find_references',
+	'go_to_definition',
 	'read_lint_errors',
+	'git_status',
+	'git_diff',
+	'package_script_list',
+	'subagent_review',
+	'read_test_failures',
 ])
 
 const parallelWriteBuiltinTools = new Set<string>([
@@ -363,6 +375,8 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 		@IDirectoryStrService private readonly _directoryStringService: IDirectoryStrService,
 		@IFileService private readonly _fileService: IFileService,
 		@IMCPService private readonly _mcpService: IMCPService,
+		@IBrowserAgentBridge private readonly _agentBridge: IBrowserAgentBridge,
+		@IAgentExtensionService private readonly _agentExtensionService: IAgentExtensionService,
 	) {
 		super()
 		this.state = { allThreads: {}, currentThreadId: null as unknown as string } // default state
@@ -725,6 +739,8 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 
 	private readonly _toolWriteLocks = new Map<string, Promise<void>>()
 	private _exclusiveToolWriteLock: Promise<void> = Promise.resolve()
+	private readonly _agentRunOfThreadId = new Map<string, AgentRun>()
+	private readonly _pendingAgentToolInvocationOfChatToolId = new Map<string, { invocation: ReturnType<typeof createLegacyToolInvocation>; ctx: ToolContext }>()
 
 
 	private _canRunInReadonlyBatch(toolName: ToolName) {
@@ -737,7 +753,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 
 	private _writeLockKeysForToolCall(toolName: ToolName, toolParams: ToolCallParams<ToolName>): { type: 'keyed', keys: string[] } | { type: 'exclusive' } | null {
 		if (!isABuiltinToolName(toolName)) return null
-		if (toolName === 'delete_file_or_folder') return { type: 'exclusive' }
+		if (toolName === 'delete_file_or_folder' || toolName === 'git_apply_patch') return { type: 'exclusive' }
 		if (toolName === 'edit_file' || toolName === 'rewrite_file') {
 			const { uri } = toolParams as BuiltinToolCallParams['edit_file'] | BuiltinToolCallParams['rewrite_file']
 			return { type: 'keyed', keys: [`file:${uri.toString()}`] }
@@ -804,6 +820,49 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 		return this._withToolWriteLocks(lockMode.keys, fn)
 	}
 
+	private _currentOrStartAgentRun(threadId: string): AgentRun {
+		const existingRun = this._agentRunOfThreadId.get(threadId)
+		if (existingRun) return existingRun
+
+		const messages = this.state.allThreads[threadId]?.messages ?? []
+		const lastUserMessage = findLast(messages, message => message.role === 'user')
+		const goal = lastUserMessage?.role === 'user'
+			? (lastUserMessage.displayContent || lastUserMessage.content || 'Continue agent run')
+			: 'Continue agent run'
+		const run = this._agentBridge.runtime.startRun({ sessionId: threadId, goal })
+		this._agentRunOfThreadId.set(threadId, run)
+		return run
+	}
+
+	private _agentToolContext(threadId: string): ToolContext {
+		const run = this._currentOrStartAgentRun(threadId)
+		return { sessionId: threadId, runId: run.runId }
+	}
+
+	private _finishAgentRun(threadId: string, summary: string): void {
+		const run = this._agentRunOfThreadId.get(threadId)
+		if (!run) return
+		this._agentBridge.runtime.finishRun(threadId, run.runId, summary)
+		this._agentRunOfThreadId.delete(threadId)
+	}
+
+	private _failAgentRun(threadId: string, error: string): void {
+		const run = this._agentRunOfThreadId.get(threadId)
+		if (!run) return
+		this._agentBridge.runtime.failRun(threadId, run.runId, error)
+		this._agentRunOfThreadId.delete(threadId)
+		this._runAgentHookSafely({ event: 'on_run_failed', metadata: { threadId, error } })
+	}
+
+	private async _runAgentHookSafely(context: Parameters<IAgentExtensionService['runHook']>[0]): Promise<void> {
+		try {
+			await this._agentExtensionService.runHook(context)
+		}
+		catch {
+			// Hooks are user automation; failures should not corrupt the agent control flow.
+		}
+	}
+
 	private _runReadonlyToolBatch = async (
 		threadId: string,
 		toolCalls: RawToolCallObj[],
@@ -817,7 +876,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 		return { interrupted: results.some(result => result.interrupted) }
 	}
 
-	private _startReadonlyToolCallEarly = (toolCall: RawToolCallObj): EarlyReadonlyToolRun => {
+	private _startReadonlyToolCallEarly = (threadId: string, toolCall: RawToolCallObj): EarlyReadonlyToolRun => {
 		const earlyRun: EarlyReadonlyToolRun = {
 			toolCall,
 			promise: Promise.resolve(null as any),
@@ -839,7 +898,11 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 			}
 
 			try {
-				const runningTool = await this._toolsService.callTool[toolName](toolParams as any)
+				const invocation = createLegacyToolInvocation(toolName, toolParams, toolCall.rawParams)
+				const toolCtx = this._agentToolContext(threadId)
+				const runningTool = await this._agentBridge.withToolContext({ ...toolCtx, toolInvocation: invocation }, () => (
+					this._toolsService.callTool[toolName](toolParams as any)
+				))
 				earlyRun.interruptTool = runningTool.interruptTool
 				const toolResult = await runningTool.result
 				const toolResultStr = this._toolsService.stringOfResult[toolName](toolParams as any, toolResult as any)
@@ -853,14 +916,14 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 		return earlyRun
 	}
 
-	private _startEarlyReadonlyToolCalls = (toolCalls: RawToolCallObj[] | undefined, earlyRuns: Map<string, EarlyReadonlyToolRun>) => {
+	private _startEarlyReadonlyToolCalls = (threadId: string, toolCalls: RawToolCallObj[] | undefined, earlyRuns: Map<string, EarlyReadonlyToolRun>) => {
 		if (!this._settingsService.state.globalSettings.parallelReadonlyTools) return
 		if (!toolCalls) return
 
 		for (const toolCall of toolCalls) {
 			if (!toolCall.isDone || !this._canRunInReadonlyBatch(toolCall.name)) return
 			if (!earlyRuns.has(toolCall.id)) {
-				earlyRuns.set(toolCall.id, this._startReadonlyToolCallEarly(toolCall))
+				earlyRuns.set(toolCall.id, this._startReadonlyToolCallEarly(threadId, toolCall))
 			}
 		}
 	}
@@ -962,6 +1025,8 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 		let toolParams: ToolCallParams<ToolName>
 		let toolResult: ToolResult<ToolName>
 		let toolResultStr: string
+		let toolInvocation = createLegacyToolInvocation(toolName, opts.unvalidatedToolParams)
+		const toolCtx = this._agentToolContext(threadId)
 
 		// Check if it's a built-in tool
 		const isBuiltInTool = isABuiltinToolName(toolName)
@@ -983,25 +1048,50 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 				this._addMessageToThread(threadId, { role: 'tool', type: 'invalid_params', rawParams: opts.unvalidatedToolParams, result: null, name: toolName, content: errorMessage, id: toolId, mcpServerName })
 				return {}
 			}
-			// once validated, add checkpoint for edit
-			if (toolName === 'edit_file') { this._addToolEditCheckpoint({ threadId, uri: (toolParams as BuiltinToolCallParams['edit_file']).uri }) }
-			if (toolName === 'rewrite_file') { this._addToolEditCheckpoint({ threadId, uri: (toolParams as BuiltinToolCallParams['rewrite_file']).uri }) }
+				// once validated, add checkpoint for edit
+				if (toolName === 'edit_file') { this._addToolEditCheckpoint({ threadId, uri: (toolParams as BuiltinToolCallParams['edit_file']).uri }) }
+				if (toolName === 'rewrite_file') { this._addToolEditCheckpoint({ threadId, uri: (toolParams as BuiltinToolCallParams['rewrite_file']).uri }) }
 
-			// 2. if tool requires approval, break from the loop, awaiting approval
+				toolInvocation = createLegacyToolInvocation(toolName, toolParams, opts.unvalidatedToolParams)
+				this._agentBridge.recordToolRequested(toolInvocation, toolCtx)
+				const permissionDecision = await this._agentBridge.runtime.decidePermission(toolInvocation)
+				if (permissionDecision.type === 'deny') {
+					this._agentBridge.recordPermissionResolved(toolInvocation.callId, permissionDecision, toolCtx)
+					this._updateLatestTool(threadId, { role: 'tool', type: 'rejected', params: toolParams, result: null, name: toolName, content: permissionDecision.reason, id: toolId, rawParams: opts.unvalidatedToolParams, mcpServerName })
+					return {}
+				}
 
-			const approvalType = isBuiltInTool ? approvalTypeOfBuiltinToolName[toolName] : 'MCP tools'
-			if (approvalType) {
-				const autoApprove = this._settingsService.state.globalSettings.autoApprove[approvalType]
-				// add a tool_request because we use it for UI if a tool is loading (this should be improved in the future)
-				this._addMessageToThread(threadId, { role: 'tool', type: 'tool_request', content: '(Awaiting user permission...)', result: null, name: toolName, params: toolParams, id: toolId, rawParams: opts.unvalidatedToolParams, mcpServerName })
-				if (!autoApprove) {
-					return { awaitingUserApproval: true }
+				// 2. if tool requires approval, break from the loop, awaiting approval
+
+				const approvalType = isBuiltInTool ? approvalTypeOfBuiltinToolName[toolName] : 'MCP tools'
+				if (permissionDecision.type === 'ask' || approvalType) {
+					const autoApprove = approvalType ? this._settingsService.state.globalSettings.autoApprove[approvalType] : false
+					// add a tool_request because we use it for UI if a tool is loading (this should be improved in the future)
+					this._addMessageToThread(threadId, { role: 'tool', type: 'tool_request', content: '(Awaiting user permission...)', result: null, name: toolName, params: toolParams, id: toolId, rawParams: opts.unvalidatedToolParams, mcpServerName })
+					if (permissionDecision.type === 'ask' && !autoApprove) {
+						this._pendingAgentToolInvocationOfChatToolId.set(toolId, { invocation: toolInvocation, ctx: toolCtx })
+						this._agentBridge.recordPermissionRequired(toolInvocation.callId, permissionDecision, toolCtx)
+						return { awaitingUserApproval: true }
+					}
+					this._agentBridge.recordPermissionResolved(toolInvocation.callId, { type: 'allow', reason: permissionDecision.type === 'ask' ? `Tool "${toolName}" was auto-approved by Void settings.` : permissionDecision.reason }, toolCtx)
+				}
+				else {
+					this._agentBridge.recordPermissionResolved(toolInvocation.callId, permissionDecision, toolCtx)
 				}
 			}
-		}
-		else {
-			toolParams = opts.validatedParams
-		}
+			else {
+				toolParams = opts.validatedParams
+				const pendingInvocation = this._pendingAgentToolInvocationOfChatToolId.get(toolId)
+				if (pendingInvocation) {
+					toolInvocation = pendingInvocation.invocation
+					this._pendingAgentToolInvocationOfChatToolId.delete(toolId)
+				}
+				else {
+					toolInvocation = createLegacyToolInvocation(toolName, toolParams, opts.unvalidatedToolParams)
+					this._agentBridge.recordToolRequested(toolInvocation, toolCtx)
+				}
+				this._agentBridge.recordPermissionResolved(toolInvocation.callId, { type: 'allow', reason: `Tool "${toolName}" was approved by the user.` }, toolCtx)
+			}
 
 
 
@@ -1018,20 +1108,26 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 		let interruptTool: (() => void) | undefined
 		let resolveInterruptor: (r: () => void) => void = () => { }
 		const interruptorPromise = new Promise<() => void>(res => { resolveInterruptor = res })
-		try {
+			try {
 
-			// set stream state
-			this._setStreamState(threadId, { isRunning: 'tool', interrupt: interruptorPromise, toolInfo: { toolName, toolParams, id: toolId, content: 'interrupted...', rawParams: opts.unvalidatedToolParams, mcpServerName } })
+				// set stream state
+				this._setStreamState(threadId, { isRunning: 'tool', interrupt: interruptorPromise, toolInfo: { toolName, toolParams, id: toolId, content: 'interrupted...', rawParams: opts.unvalidatedToolParams, mcpServerName } })
 			resolveInterruptor(() => {
 				interrupted = true
 				interruptTool?.()
 			})
 
 			const runTool = async () => {
-				if (interrupted) return undefined
-				if (isBuiltInTool) {
-					const toolCall = await this._toolsService.callTool[toolName](toolParams as any)
-					interruptTool = toolCall.interruptTool
+					if (interrupted) return undefined
+					await this._runAgentHookSafely({ event: 'before_tool_call', toolCall: toolInvocation, metadata: { threadId, toolId, toolName } })
+					if (toolName === 'edit_file' || toolName === 'rewrite_file' || toolName === 'create_file_or_folder' || toolName === 'delete_file_or_folder' || toolName === 'git_apply_patch') {
+						await this._runAgentHookSafely({ event: 'before_file_edit', toolCall: toolInvocation, metadata: { threadId, toolId, toolName } })
+					}
+					if (isBuiltInTool) {
+						const toolCall = await this._agentBridge.withToolContext({ ...toolCtx, toolAlreadyRequested: true, toolInvocation }, () => (
+							this._toolsService.callTool[toolName](toolParams as any)
+						))
+						interruptTool = toolCall.interruptTool
 
 					if (interrupted) {
 						interruptTool?.()
@@ -1040,18 +1136,21 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 
 					return await toolCall.result
 				}
-				else {
-					const mcpTools = this._mcpService.getMCPTools()
-					const mcpTool = mcpTools?.find(t => t.name === toolName)
-					if (!mcpTool) { throw new Error(`MCP tool ${toolName} not found`) }
+					else {
+						const mcpTools = this._mcpService.getMCPTools()
+						const mcpTool = mcpTools?.find(t => t.name === toolName)
+						if (!mcpTool) { throw new Error(`MCP tool ${toolName} not found`) }
 
-					return (await this._mcpService.callMCPTool({
-						serverName: mcpTool.mcpServerName ?? 'unknown_mcp_server',
-						toolName: toolName,
-						params: toolParams
-					})).result
+						this._agentBridge.recordToolStarted(toolInvocation, { ...toolCtx, toolAlreadyRequested: true })
+						const mcpResult = (await this._mcpService.callMCPTool({
+							serverName: mcpTool.mcpServerName ?? 'unknown_mcp_server',
+							toolName: toolName,
+							params: toolParams
+						})).result
+						this._agentBridge.recordToolFinished(toolInvocation.callId, { ok: true, data: mcpResult }, toolCtx)
+						return mcpResult
+					}
 				}
-			}
 
 			const lockedToolResult = await this._withToolExecutionLock(toolName, toolParams, runTool)
 			if (lockedToolResult === undefined && interrupted) {
@@ -1065,9 +1164,12 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 			resolveInterruptor(() => { }) // resolve for the sake of it
 			if (interrupted) { return { interrupted: true } } // the tool result is added where we interrupt, not here
 
-			const errorMessage = getErrorMessage(error)
-			this._updateLatestTool(threadId, { role: 'tool', type: 'tool_error', params: toolParams, result: errorMessage, name: toolName, content: errorMessage, id: toolId, rawParams: opts.unvalidatedToolParams, mcpServerName })
-			return {}
+				const errorMessage = getErrorMessage(error)
+				if (!isBuiltInTool) {
+					this._agentBridge.recordToolFailed(toolInvocation.callId, errorMessage, toolCtx)
+				}
+				this._updateLatestTool(threadId, { role: 'tool', type: 'tool_error', params: toolParams, result: errorMessage, name: toolName, content: errorMessage, id: toolId, rawParams: opts.unvalidatedToolParams, mcpServerName })
+				return {}
 		}
 
 		// 4. stringify the result to give to the LLM
@@ -1085,10 +1187,17 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 			return {}
 		}
 
-		// 5. add to history and keep going
-		this._updateLatestTool(threadId, { role: 'tool', type: 'success', params: toolParams, result: toolResult, name: toolName, content: toolResultStr, id: toolId, rawParams: opts.unvalidatedToolParams, mcpServerName })
-		return {}
-	};
+			// 5. add to history and keep going
+			this._updateLatestTool(threadId, { role: 'tool', type: 'success', params: toolParams, result: toolResult, name: toolName, content: toolResultStr, id: toolId, rawParams: opts.unvalidatedToolParams, mcpServerName })
+			await this._runAgentHookSafely({ event: 'after_tool_call', toolCall: toolInvocation, toolResult: { ok: true, data: toolResult }, metadata: { threadId, toolId, toolName } })
+			if (toolName === 'edit_file' || toolName === 'rewrite_file' || toolName === 'create_file_or_folder' || toolName === 'delete_file_or_folder' || toolName === 'git_apply_patch') {
+				await this._runAgentHookSafely({ event: 'after_file_edit', toolCall: toolInvocation, toolResult: { ok: true, data: toolResult }, metadata: { threadId, toolId, toolName } })
+			}
+			if (toolName === 'run_command' || toolName === 'run_tests' || toolName === 'install_dependencies' || toolName === 'run_persistent_command' || toolName === 'git_status' || toolName === 'git_diff' || toolName === 'git_apply_patch' || toolName === 'git_create_branch' || toolName === 'git_commit' || toolName === 'package_script_list' || toolName === 'subagent_review' || toolName === 'git_worktree_create' || toolName === 'git_worktree_delete') {
+				await this._runAgentHookSafely({ event: 'after_run_command', toolCall: toolInvocation, toolResult: { ok: true, data: toolResult }, metadata: { threadId, toolId, toolName } })
+			}
+			return {}
+		};
 
 
 
@@ -1104,10 +1213,15 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 		modelSelectionOptions: ModelSelectionOptions | undefined,
 
 		callThisToolFirst?: ToolMessage<ToolName> & { type: 'tool_request' }
-	}) {
+		}) {
 
+			this._currentOrStartAgentRun(threadId)
+			let keepAgentRunOpen = false
+			let agentRunError: string | null = null
 
-		let interruptedWhenIdle = false
+			try {
+
+			let interruptedWhenIdle = false
 		const idleInterruptor = Promise.resolve(() => { interruptedWhenIdle = true })
 		// _runToolCall does not need setStreamState({idle}) before it, but it needs it after it. (handles its own setStreamState)
 
@@ -1204,11 +1318,11 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 					| { type: 'llmError', error?: { message: string; fullError: Error | null; } }
 					| { type: 'llmAborted' }
 
-				let resMessageIsDonePromise: (res: ResTypes) => void // resolves when user approves this tool use (or if tool doesn't require approval)
-				const messageIsDonePromise = new Promise<ResTypes>((res, rej) => { resMessageIsDonePromise = res })
-				const earlyReadonlyToolRuns = new Map<string, EarlyReadonlyToolRun>()
+					let resMessageIsDonePromise: (res: ResTypes) => void // resolves when user approves this tool use (or if tool doesn't require approval)
+					const messageIsDonePromise = new Promise<ResTypes>((res, rej) => { resMessageIsDonePromise = res })
+					const earlyReadonlyToolRuns = new Map<string, EarlyReadonlyToolRun>()
 
-				const llmCancelToken = this._llmMessageService.sendLLMMessage({
+					const llmCancelToken = this._llmMessageService.sendLLMMessage({
 					messagesType: 'chatMessages',
 					chatMode,
 					messages: messages,
@@ -1216,9 +1330,9 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 					modelSelectionOptions,
 					overridesOfModel,
 					logging: { loggingName: `Chat - ${chatMode}`, loggingExtras: { threadId, nMessagesSent, chatMode } },
-					separateSystemMessage: separateSystemMessage,
-					onText: ({ fullText, fullReasoning, toolCall, toolCalls }) => {
-						this._startEarlyReadonlyToolCalls(toolCalls, earlyReadonlyToolRuns)
+						separateSystemMessage: separateSystemMessage,
+						onText: ({ fullText, fullReasoning, toolCall, toolCalls }) => {
+							this._startEarlyReadonlyToolCalls(threadId, toolCalls, earlyReadonlyToolRuns)
 						this._scheduleLLMStreamState(
 							threadId,
 							{ displayContentSoFar: fullText, reasoningSoFar: fullReasoning, toolCallSoFar: toolCall ?? toolCalls?.[0] ?? null, toolCallsSoFar: toolCalls ?? (toolCall ? [toolCall] : null) },
@@ -1226,6 +1340,10 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 						)
 					},
 					onFinalMessage: async ({ fullText, fullReasoning, toolCall, toolCalls, anthropicReasoning, }) => {
+						if (fullText) {
+							const run = this._currentOrStartAgentRun(threadId)
+							this._agentBridge.emit({ type: 'model.delta', sessionId: threadId, runId: run.runId, text: fullText })
+						}
 						const normalizedToolCalls = toolCalls ?? (toolCall ? [toolCall] : undefined)
 						resMessageIsDonePromise({ type: 'llmDone', toolCalls: normalizedToolCalls, info: { fullText, fullReasoning, anthropicReasoning } }) // resolve with tool calls
 					},
@@ -1321,14 +1439,37 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 		// add checkpoint before the next user message
 		if (!isRunningWhenEnd) this._addUserCheckpoint({ threadId })
 
-		// capture number of messages sent
-		this._metricsService.capture('Agent Loop Done', { nMessagesSent, chatMode })
-	}
+			// capture number of messages sent
+			this._metricsService.capture('Agent Loop Done', { nMessagesSent, chatMode })
+			keepAgentRunOpen = !!isRunningWhenEnd
+			if (!keepAgentRunOpen) {
+				this._finishAgentRun(threadId, `Agent loop completed after ${nMessagesSent} message${nMessagesSent === 1 ? '' : 's'}.`)
+			}
+			}
+			catch (error) {
+				agentRunError = getErrorMessage(error)
+				throw error
+			}
+			finally {
+				if (agentRunError) {
+					this._failAgentRun(threadId, agentRunError)
+				}
+				else if (!keepAgentRunOpen) {
+					this._finishAgentRun(threadId, 'Agent loop stopped.')
+				}
+			}
+		}
 
 
-	private _addCheckpoint(threadId: string, checkpoint: CheckpointEntry) {
-		this._addMessageToThread(threadId, checkpoint)
-		// // update latest checkpoint idx to the one we just added
+		private _addCheckpoint(threadId: string, checkpoint: CheckpointEntry) {
+			this._runAgentHookSafely({ event: 'before_checkpoint', metadata: { threadId } })
+			this._addMessageToThread(threadId, checkpoint)
+			const run = this._agentRunOfThreadId.get(threadId)
+			if (run) {
+				this._agentBridge.emit({ type: 'checkpoint.created', sessionId: threadId, runId: run.runId, checkpointId: generateUuid() })
+			}
+			this._runAgentHookSafely({ event: 'after_checkpoint', metadata: { threadId } })
+			// // update latest checkpoint idx to the one we just added
 		// const newThread = this.state.allThreads[threadId]
 		// if (!newThread) return // should never happen
 		// const currCheckpointIdx = newThread.messages.length - 1

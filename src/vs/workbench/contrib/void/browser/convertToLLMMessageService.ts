@@ -20,6 +20,7 @@ import { URI } from '../../../../base/common/uri.js';
 import { EndOfLinePreference } from '../../../../editor/common/model.js';
 import { ToolName } from '../common/toolsServiceTypes.js';
 import { IMCPService } from '../common/mcpService.js';
+import { IAgentExtensionService } from './agent/AgentExtensionService.js';
 
 export const EMPTY_MESSAGE = '(empty message)'
 
@@ -53,6 +54,7 @@ const CHARS_PER_TOKEN = 4 // assume abysmal chars per token
 const TRIM_TO_LEN = 120
 const DIRECTORY_STR_CACHE_TTL_MS = 30_000
 const VOID_RULES_CACHE_TTL_MS = 30_000
+const AGENT_MANIFEST_FILENAMES = ['AGENTS.md', 'VOID.md', 'CLAUDE.md', '.voidrules'] as const
 
 
 
@@ -636,23 +638,26 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 		@IVoidModelService private readonly voidModelService: IVoidModelService,
 		@IMCPService private readonly mcpService: IMCPService,
 		@ILLMMessageService private readonly _llmMessageService: ILLMMessageService,
+		@IAgentExtensionService private readonly _agentExtensionService: IAgentExtensionService,
 	) {
 		super()
 	}
 
-	// Read .voidrules files from workspace folders
-	private _getVoidRulesFileContents(): string {
-		try {
-			const workspaceFolders = this.workspaceContextService.getWorkspace().folders;
-			let voidRules = '';
-			for (const folder of workspaceFolders) {
-				const uri = URI.joinPath(folder.uri, '.voidrules')
-				const { model } = this.voidModelService.getModel(uri)
-				if (!model) continue
-				voidRules += model.getValue(EndOfLinePreference.LF) + '\n\n';
+		// Read agent instruction files from workspace folders.
+		private _getVoidRulesFileContents(): string {
+			try {
+				const workspaceFolders = this.workspaceContextService.getWorkspace().folders;
+				let voidRules = '';
+				for (const folder of workspaceFolders) {
+					for (const filename of AGENT_MANIFEST_FILENAMES) {
+						const uri = URI.joinPath(folder.uri, filename)
+						const { model } = this.voidModelService.getModel(uri)
+						if (!model) continue
+						voidRules += `# ${filename}\n${model.getValue(EndOfLinePreference.LF)}\n\n`;
+					}
+				}
+				return voidRules.trim();
 			}
-			return voidRules.trim();
-		}
 		catch (e) {
 			return ''
 		}
@@ -675,16 +680,16 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 
 		const computePromise = (async () => {
 		try {
-			const contents = await Promise.all(workspaceFolders.map(async folder => {
-				try {
-					const uri = URI.joinPath(folder.uri, '.voidrules');
-					const fileContent = await this.fileService.readFile(uri);
-					return fileContent.value.toString();
-				}
-				catch {
-					return '';
-				}
-			}));
+				const contents = await Promise.all(workspaceFolders.flatMap(folder => AGENT_MANIFEST_FILENAMES.map(async filename => {
+					try {
+						const uri = URI.joinPath(folder.uri, filename);
+						const fileContent = await this.fileService.readFile(uri);
+						return `# ${filename}\n${fileContent.value.toString()}`;
+					}
+					catch {
+						return '';
+					}
+				})));
 
 			return contents
 				.filter(Boolean)
@@ -720,11 +725,27 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 	private async _getCombinedAIInstructionsAsync(): Promise<string> {
 		const globalAIInstructions = this.voidSettingsService.state.globalSettings.aiInstructions;
 		const voidRulesFileContent = await this._getVoidRulesFileContentsAsync();
+		const skillInstructions = this._getSkillInstructions();
 
 		const ans: string[] = [];
 		if (globalAIInstructions) ans.push(globalAIInstructions);
 		if (voidRulesFileContent) ans.push(voidRulesFileContent);
+		if (skillInstructions) ans.push(skillInstructions);
 		return ans.join('\n\n');
+	}
+
+	private _getSkillInstructions(): string {
+		const skills = this._agentExtensionService.listSkills();
+		if (!skills.length) return '';
+		return [
+			'# Available Void Skills',
+			'Use these workspace skills when the user task matches their description. Respect each skill tool list and context.',
+			...skills.map(skill => {
+				const tools = skill.tools.length ? skill.tools.join(', ') : 'any appropriate tool';
+				const body = skill.body.trim().slice(0, 4000);
+				return `## ${skill.name}\nDescription: ${skill.description || '(none)'}\nContext: ${skill.context}\nTools: ${tools}\n${body}`;
+			}),
+		].join('\n\n');
 	}
 
 	private async _getDirectoryStrCached(chatMode: ChatMode): Promise<string> {
