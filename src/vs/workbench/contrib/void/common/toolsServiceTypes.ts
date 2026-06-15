@@ -72,7 +72,7 @@ export type BuiltinToolCallParams = {
 	'git_worktree_create': { cwd: string | null, path: string, branchName: string, baseRef: string | null },
 	'git_worktree_delete': { cwd: string | null, path: string, prune: boolean },
 	'package_script_list': { cwd: string | null },
-	'subagent_review': { cwd: string | null, goal: string, includeDiff: boolean },
+	'review_snapshot': { cwd: string | null, goal: string, includeDiff: boolean },
 	'read_test_failures': { output: string, maxItems: number },
 	// ---
 	'rewrite_file': { uri: URI, newContent: string },
@@ -105,10 +105,10 @@ export type BuiltinToolResultType = {
 	'git_apply_patch': { result: string; resolveReason: TerminalResolveReason; },
 	'git_create_branch': { result: string; resolveReason: TerminalResolveReason; },
 	'git_commit': { result: string; resolveReason: TerminalResolveReason; },
-	'git_worktree_create': { id: string; path: string; branchName: string; result: string; resolveReason: TerminalResolveReason; },
-	'git_worktree_delete': { path: string; result: string; resolveReason: TerminalResolveReason; },
+	'git_worktree_create': { id: string; path: string; branchName: string; status: 'ready' | 'failed'; result: string; resolveReason: TerminalResolveReason; },
+	'git_worktree_delete': { path: string; status: 'deleted' | 'failed'; result: string; resolveReason: TerminalResolveReason; },
 	'package_script_list': { result: string; resolveReason: TerminalResolveReason; },
-	'subagent_review': { id: string; goal: string; result: string; resolveReason: TerminalResolveReason; },
+	'review_snapshot': { id: string; goal: string; result: string; resolveReason: TerminalResolveReason; },
 	'read_test_failures': { failures: string[] },
 	// ---
 	'rewrite_file': Promise<{ lintErrors: LintErrorItem[] | null }>,

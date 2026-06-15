@@ -16,7 +16,7 @@ const readTools = new Set<string>([
 	'git_status',
 	'git_diff',
 	'package_script_list',
-	'subagent_review',
+	'review_snapshot',
 	'read_test_failures',
 ]);
 
@@ -44,9 +44,10 @@ export class RiskClassifier {
 		if (readTools.has(toolName)) return 'low';
 		if (writeTools.has(toolName)) return this._mentionsProtectedPath(input) ? 'high' : 'medium';
 		if (toolName === 'delete_file_or_folder') return 'critical';
-		if (executeTools.has(toolName)) return this._looksDangerousCommand(input) ? 'critical' : 'high';
+		if (toolName === 'run_command' || toolName === 'run_persistent_command') return this._classifyTerminalCommand(input);
 		if (toolName === 'git_commit' || toolName === 'git_create_branch') return 'medium';
 		if (toolName === 'git_worktree_delete' || toolName === 'git_push') return 'high';
+		if (executeTools.has(toolName)) return this._looksDangerousCommand(input) ? 'critical' : 'high';
 		if (toolName === 'mcp_call_tool') return 'high';
 		return 'medium';
 	}
@@ -59,5 +60,50 @@ export class RiskClassifier {
 	private _looksDangerousCommand(input: unknown): boolean {
 		const value = safeStringify(input ?? '').toLowerCase();
 		return /\brm\s+-rf\b/.test(value) || value.includes(' sudo ') || value.includes('curl ') || value.includes('wget ');
+	}
+
+	private _classifyTerminalCommand(input: unknown): RiskLevel {
+		const command = this._extractCommand(input);
+		if (!command) return 'high';
+		const normalized = command.toLowerCase();
+
+		if (
+			/\brm\s+-rf\b/.test(normalized)
+			|| /\bsudo\b/.test(normalized)
+			|| /\bchmod\s+[-+]?[0-7]*777\b/.test(normalized)
+			|| /\b(chown|mkfs|dd)\b/.test(normalized)
+			|| /\b(git\s+reset|git\s+clean)\b/.test(normalized)
+			|| /\b(git\s+branch\s+-d|git\s+branch\s+-D|git\s+worktree\s+remove|git\s+push)\b/i.test(command)
+			|| /\b(curl|wget)\b.*\|\s*(sh|bash|zsh|fish)\b/.test(normalized)
+		) {
+			return 'critical';
+		}
+
+		if (
+			/\b(git\s+commit|git\s+checkout\s+-b|git\s+switch\s+-c|git\s+apply|git\s+am|git\s+merge|git\s+rebase|git\s+cherry-pick|git\s+tag)\b/.test(normalized)
+			|| /\b(npm|pnpm|yarn|bun)\s+(install|add|remove|update|upgrade)\b/.test(normalized)
+			|| /\b(pip|pip3|uv|poetry|cargo|go)\s+(install|add|remove|update|get)\b/.test(normalized)
+			|| /\b(curl|wget)\b/.test(normalized)
+		) {
+			return 'high';
+		}
+
+		if (
+			/^\s*git\s+(status|diff|show|log|branch\s+(--show-current|-vv?)?|rev-parse|ls-files)\b/.test(normalized)
+			|| /^\s*(rg|grep|sed|awk|cat|head|tail|ls|find|pwd|wc)\b/.test(normalized)
+		) {
+			return 'low';
+		}
+
+		return 'high';
+	}
+
+	private _extractCommand(input: unknown): string {
+		if (typeof input === 'string') return input;
+		if (input && typeof input === 'object' && 'command' in input) {
+			const command = (input as { command?: unknown }).command;
+			return typeof command === 'string' ? command : safeStringify(command ?? '');
+		}
+		return safeStringify(input ?? '');
 	}
 }

@@ -28,6 +28,10 @@ export class WorktreeManager {
 		return this.worktrees.get(id);
 	}
 
+	findByPath(path: string): WorktreeDescriptor | undefined {
+		return [...this.worktrees.values()].find(worktree => worktree.uri.fsPath === path);
+	}
+
 	list(): readonly WorktreeDescriptor[] {
 		return [...this.worktrees.values()];
 	}

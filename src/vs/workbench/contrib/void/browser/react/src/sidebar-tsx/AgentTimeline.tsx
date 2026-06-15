@@ -15,6 +15,7 @@ type CandidatePatch = {
 	path: string;
 	branchName: string;
 	createdAt: number;
+	status: 'ready' | 'reviewed' | 'discarded' | 'failed';
 	review?: string;
 }
 
@@ -37,8 +38,15 @@ const eventDetail = (event: AgentEvent) => {
 	if (event.type === 'run.started') return event.goal
 	if (event.type === 'model.delta') return event.text.trim()
 	if (event.type === 'tool.requested') return safeStringify(event.call.input)
-	if (event.type === 'permission.required') return event.decision.reason
-	if (event.type === 'permission.resolved') return event.decision.reason
+	if (event.type === 'permission.required' || event.type === 'permission.resolved') {
+		if (event.decision.type === 'ask' && event.decision.preview?.type === 'list') {
+			return `${event.decision.reason}\n${event.decision.preview.items.map(item => `- ${item}`).join('\n')}`
+		}
+		if (event.decision.type === 'ask' && event.decision.preview?.type === 'code') {
+			return `${event.decision.reason}\n${event.decision.preview.value}`
+		}
+		return event.decision.reason
+	}
 	if (event.type === 'tool.finished') return event.result.stderr ?? event.result.stdout ?? safeStringify(event.result.data ?? '')
 	if (event.type === 'tool.failed') return event.error
 	if (event.type === 'checkpoint.created') return event.checkpointId
@@ -107,16 +115,23 @@ const getCandidatePatches = (events: readonly AgentEvent[]): CandidatePatch[] =>
 				path: String(data.path),
 				branchName: String(data.branchName),
 				createdAt: event.finishedAt,
+				status: data.status === 'failed' ? 'failed' as const : 'ready' as const,
 			}
 			candidates.set(candidate.id, candidate)
 			latestCandidateId = candidate.id
 		}
-		if (toolName === 'subagent_review' && data?.result) {
+		if (toolName === 'review_snapshot' && data?.result) {
 			const targetId = latestCandidateId
 			if (!targetId) continue
 			const current = candidates.get(targetId)
 			if (!current) continue
-			candidates.set(targetId, { ...current, review: String(data.result).slice(0, 2000) })
+			candidates.set(targetId, { ...current, status: current.status === 'failed' ? 'failed' : 'reviewed', review: String(data.result).slice(0, 2000) })
+		}
+		if (toolName === 'git_worktree_delete' && data?.path) {
+			for (const [id, current] of candidates) {
+				if (current.path !== String(data.path)) continue
+				candidates.set(id, { ...current, status: data.status === 'failed' ? 'failed' : 'discarded' })
+			}
 		}
 	}
 
@@ -137,7 +152,10 @@ const CandidatePatchPanel = ({ candidates }: { candidates: readonly CandidatePat
 							<div className='truncate text-xs font-medium text-void-fg-1'>{candidate.branchName}</div>
 							<div className='truncate text-xs text-void-fg-3'>{candidate.path}</div>
 						</div>
-						<div className='shrink-0 rounded bg-void-bg-3 px-1.5 py-0.5 text-[10px] text-void-fg-3'>{candidate.id}</div>
+						<div className='flex shrink-0 items-center gap-1'>
+							<div className='rounded bg-void-bg-3 px-1.5 py-0.5 text-[10px] text-void-fg-3'>{candidate.status}</div>
+							<div className='rounded bg-void-bg-3 px-1.5 py-0.5 text-[10px] text-void-fg-3'>{candidate.id}</div>
+						</div>
 					</div>
 					<div className='mt-2 flex flex-wrap gap-1.5'>
 						<CopyCommandButton command={commands.compare} label='Compare' icon={<GitCompare size={13} />} />

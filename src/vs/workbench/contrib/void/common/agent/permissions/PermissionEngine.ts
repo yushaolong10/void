@@ -35,13 +35,50 @@ export class PermissionEngine {
 
 		return {
 			type: 'ask',
-			reason: `Tool "${call.name}" requires approval.`,
+			reason: this._reasonForDecision(call.name, risk),
 			risk,
-			preview: {
-				type: 'code',
-				language: 'json',
-				value: safeStringify(call.input, 2),
-			},
+			preview: this._previewForDecision(call, risk),
 		};
+	}
+
+	private _reasonForDecision(toolName: string, risk: string): string {
+		if (risk === 'critical') return `Critical-risk tool "${toolName}" requires explicit approval.`;
+		if (risk === 'high') return `High-risk tool "${toolName}" requires approval.`;
+		return `Tool "${toolName}" requires approval.`;
+	}
+
+	private _previewForDecision(call: ToolInvocation, risk: string) {
+		const input = call.input && typeof call.input === 'object' ? call.input as Record<string, unknown> : {};
+		const items = [
+			`Tool: ${call.name}`,
+			`Risk: ${risk}`,
+			...this._impactItems(call.name, input),
+		];
+		return {
+			type: 'list' as const,
+			items,
+		};
+	}
+
+	private _impactItems(toolName: string, input: Record<string, unknown>): string[] {
+		const cwd = typeof input.cwd === 'string' ? `cwd: ${input.cwd}` : undefined;
+		const command = typeof input.command === 'string' ? `command: ${input.command}` : undefined;
+		const uri = input.uri ? `path: ${safeStringify(input.uri)}` : undefined;
+		const branchName = typeof input.branchName === 'string' ? `branch: ${input.branchName}` : undefined;
+		const baseRef = typeof input.baseRef === 'string' ? `base ref: ${input.baseRef}` : undefined;
+		const path = typeof input.path === 'string' ? `path: ${input.path}` : undefined;
+		const message = typeof input.message === 'string' ? `commit message: ${input.message}` : undefined;
+
+		const details = [cwd, command, uri, branchName, baseRef, path, message].filter((item): item is string => !!item);
+		if (toolName === 'git_commit') return ['Creates a git commit in the selected repository.', ...details, 'Recommended check: inspect git_status and git_diff before approving.'];
+		if (toolName === 'git_create_branch') return ['Creates and checks out a new git branch.', ...details];
+		if (toolName === 'git_worktree_create') return ['Creates a candidate git worktree and branch.', ...details];
+		if (toolName === 'git_worktree_delete') return ['Removes a git worktree and may prune worktree metadata.', ...details];
+		if (toolName === 'git_apply_patch') return ['Applies a patch through git apply.', ...details, 'Recommended check: use check_only first when practical.'];
+		if (toolName === 'delete_file_or_folder') return ['Deletes a file or folder.', ...details];
+		if (toolName === 'run_command' || toolName === 'run_persistent_command') return ['Runs a terminal command in the user environment.', ...details];
+		if (toolName === 'install_dependencies') return ['Runs a dependency installation command.', ...details];
+		if (toolName === 'run_tests') return ['Runs a verification command.', ...details];
+		return details.length ? details : [`Input: ${safeStringify(input, 2)}`];
 	}
 }

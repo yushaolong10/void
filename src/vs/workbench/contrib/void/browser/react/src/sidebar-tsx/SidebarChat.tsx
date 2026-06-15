@@ -1403,17 +1403,31 @@ const titleOfBuiltinToolName = {
 	'get_dir_tree': { done: 'Inspected folder tree', proposed: 'Inspect folder tree', running: loadingTitleWrapper('Inspecting folder tree') },
 	'search_pathnames_only': { done: 'Searched by file name', proposed: 'Search by file name', running: loadingTitleWrapper('Searching by file name') },
 	'search_for_files': { done: 'Searched', proposed: 'Search', running: loadingTitleWrapper('Searching') },
+	'read_symbol': { done: 'Read symbol', proposed: 'Read symbol', running: loadingTitleWrapper('Reading symbol') },
+	'find_references': { done: 'Found references', proposed: 'Find references', running: loadingTitleWrapper('Finding references') },
+	'go_to_definition': { done: 'Found definition', proposed: 'Find definition', running: loadingTitleWrapper('Finding definition') },
+	'read_lint_errors': { done: `Read lint errors`, proposed: 'Read lint errors', running: loadingTitleWrapper('Reading lint errors') },
+	'git_status': { done: 'Read git status', proposed: 'Read git status', running: loadingTitleWrapper('Reading git status') },
+	'git_diff': { done: 'Read git diff', proposed: 'Read git diff', running: loadingTitleWrapper('Reading git diff') },
+	'git_apply_patch': { done: 'Applied patch', proposed: 'Apply patch', running: loadingTitleWrapper('Applying patch') },
+	'git_create_branch': { done: 'Created branch', proposed: 'Create branch', running: loadingTitleWrapper('Creating branch') },
+	'git_commit': { done: 'Created commit', proposed: 'Create commit', running: loadingTitleWrapper('Creating commit') },
+	'git_worktree_create': { done: 'Created worktree', proposed: 'Create worktree', running: loadingTitleWrapper('Creating worktree') },
+	'git_worktree_delete': { done: 'Removed worktree', proposed: 'Remove worktree', running: loadingTitleWrapper('Removing worktree') },
+	'package_script_list': { done: 'Listed scripts', proposed: 'List scripts', running: loadingTitleWrapper('Listing scripts') },
+	'review_snapshot': { done: 'Captured review snapshot', proposed: 'Capture review snapshot', running: loadingTitleWrapper('Capturing review snapshot') },
+	'read_test_failures': { done: 'Read test failures', proposed: 'Read test failures', running: loadingTitleWrapper('Reading test failures') },
 	'create_file_or_folder': { done: `Created`, proposed: `Create`, running: loadingTitleWrapper(`Creating`) },
 	'delete_file_or_folder': { done: `Deleted`, proposed: `Delete`, running: loadingTitleWrapper(`Deleting`) },
 	'edit_file': { done: `Edited file`, proposed: 'Edit file', running: loadingTitleWrapper('Editing file') },
 	'rewrite_file': { done: `Wrote file`, proposed: 'Write file', running: loadingTitleWrapper('Writing file') },
 	'run_command': { done: `Ran terminal`, proposed: 'Run terminal', running: loadingTitleWrapper('Running terminal') },
+	'run_tests': { done: `Ran verification`, proposed: 'Run verification', running: loadingTitleWrapper('Running verification') },
+	'install_dependencies': { done: `Installed dependencies`, proposed: 'Install dependencies', running: loadingTitleWrapper('Installing dependencies') },
 	'run_persistent_command': { done: `Ran terminal`, proposed: 'Run terminal', running: loadingTitleWrapper('Running terminal') },
 
 	'open_persistent_terminal': { done: `Opened terminal`, proposed: 'Open terminal', running: loadingTitleWrapper('Opening terminal') },
 	'kill_persistent_terminal': { done: `Killed terminal`, proposed: 'Kill terminal', running: loadingTitleWrapper('Killing terminal') },
-
-	'read_lint_errors': { done: `Read lint errors`, proposed: 'Read lint errors', running: loadingTitleWrapper('Reading lint errors') },
 	'search_in_file': { done: 'Searched in file', proposed: 'Search in file', running: loadingTitleWrapper('Searching in file') },
 } as const satisfies Record<BuiltinToolName, { done: any, proposed: any, running: any }>
 
@@ -1493,6 +1507,58 @@ const toolNameToDesc = (toolName: BuiltinToolName, _toolParams: BuiltinToolCallP
 				desc1Info: getRelative(toolParams.uri, accessor),
 			};
 		},
+		'read_symbol': () => {
+			const toolParams = _toolParams as BuiltinToolCallParams['read_symbol']
+			return { desc1: toolParams.symbol }
+		},
+		'find_references': () => {
+			const toolParams = _toolParams as BuiltinToolCallParams['find_references']
+			return { desc1: toolParams.symbol }
+		},
+		'go_to_definition': () => {
+			const toolParams = _toolParams as BuiltinToolCallParams['go_to_definition']
+			return { desc1: toolParams.symbol }
+		},
+		'git_status': () => {
+			const toolParams = _toolParams as BuiltinToolCallParams['git_status']
+			return { desc1: toolParams.cwd ?? '' }
+		},
+		'git_diff': () => {
+			const toolParams = _toolParams as BuiltinToolCallParams['git_diff']
+			return { desc1: toolParams.staged ? 'staged' : 'working tree', desc1Info: toolParams.cwd ?? undefined }
+		},
+		'git_apply_patch': () => {
+			const toolParams = _toolParams as BuiltinToolCallParams['git_apply_patch']
+			return { desc1: toolParams.checkOnly ? 'check only' : 'apply patch', desc1Info: toolParams.cwd ?? undefined }
+		},
+		'git_create_branch': () => {
+			const toolParams = _toolParams as BuiltinToolCallParams['git_create_branch']
+			return { desc1: toolParams.branchName, desc1Info: toolParams.baseRef ?? undefined }
+		},
+		'git_commit': () => {
+			const toolParams = _toolParams as BuiltinToolCallParams['git_commit']
+			return { desc1: toolParams.message, desc1Info: toolParams.all ? 'tracked changes' : undefined }
+		},
+		'git_worktree_create': () => {
+			const toolParams = _toolParams as BuiltinToolCallParams['git_worktree_create']
+			return { desc1: toolParams.branchName, desc1Info: toolParams.path }
+		},
+		'git_worktree_delete': () => {
+			const toolParams = _toolParams as BuiltinToolCallParams['git_worktree_delete']
+			return { desc1: toolParams.path }
+		},
+		'package_script_list': () => {
+			const toolParams = _toolParams as BuiltinToolCallParams['package_script_list']
+			return { desc1: toolParams.cwd ?? '' }
+		},
+		'review_snapshot': () => {
+			const toolParams = _toolParams as BuiltinToolCallParams['review_snapshot']
+			return { desc1: toolParams.goal, desc1Info: toolParams.cwd ?? undefined }
+		},
+		'read_test_failures': () => {
+			const toolParams = _toolParams as BuiltinToolCallParams['read_test_failures']
+			return { desc1: `${toolParams.maxItems} item${toolParams.maxItems === 1 ? '' : 's'}` }
+		},
 		'create_file_or_folder': () => {
 			const toolParams = _toolParams as BuiltinToolCallParams['create_file_or_folder']
 			return {
@@ -1523,6 +1589,18 @@ const toolNameToDesc = (toolName: BuiltinToolName, _toolParams: BuiltinToolCallP
 		},
 		'run_command': () => {
 			const toolParams = _toolParams as BuiltinToolCallParams['run_command']
+			return {
+				desc1: `"${toolParams.command}"`,
+			}
+		},
+		'run_tests': () => {
+			const toolParams = _toolParams as BuiltinToolCallParams['run_tests']
+			return {
+				desc1: `"${toolParams.command}"`,
+			}
+		},
+		'install_dependencies': () => {
+			const toolParams = _toolParams as BuiltinToolCallParams['install_dependencies']
 			return {
 				desc1: `"${toolParams.command}"`,
 			}
@@ -1853,6 +1931,43 @@ const CommandTool = ({ toolMessage, type, threadId }: { threadId: string } & ({
 	return <>
 		<ToolHeaderWrapper {...componentParams} isOpen={type === 'run_command' && toolMessage.type === 'running_now' ? true : undefined} />
 	</>
+}
+
+const GenericBuiltinTool = <T extends BuiltinToolName>({ toolMessage }: WrapperProps<T>) => {
+	const accessor = useAccessor()
+	const toolsService = accessor.get('IToolsService')
+	const title = getTitle(toolMessage)
+	const { desc1, desc1Info } = toolNameToDesc(toolMessage.name as BuiltinToolName, toolMessage.params as any, accessor)
+	const isError = false
+	const icon = null
+	const isRejected = toolMessage.type === 'rejected'
+	const componentParams: ToolHeaderParams = { title, desc1, desc1Info, isError, icon, isRejected }
+
+	if (toolMessage.type === 'success') {
+		const stringify = toolsService.stringOfResult[toolMessage.name as BuiltinToolName] as (params: unknown, result: unknown) => string
+		const msg = stringify(toolMessage.params, toolMessage.result)
+		componentParams.children = <ToolChildrenWrapper className='whitespace-pre text-nowrap overflow-auto text-sm'>
+			<div className='!select-text cursor-auto'>
+				<BlockCode initValue={msg.trim()} language='shellscript' />
+			</div>
+		</ToolChildrenWrapper>
+	}
+	else if (toolMessage.type === 'tool_request') {
+		componentParams.children = <ToolChildrenWrapper className='whitespace-pre-wrap overflow-auto text-sm'>
+			<div className='!select-text cursor-auto'>
+				{toolMessage.content}
+			</div>
+		</ToolChildrenWrapper>
+	}
+	else if (toolMessage.type === 'tool_error') {
+		componentParams.bottomChildren = <BottomChildren title='Error'>
+			<CodeChildren>
+				{toolMessage.result}
+			</CodeChildren>
+		</BottomChildren>
+	}
+
+	return <ToolHeaderWrapper {...componentParams} />
 }
 
 type WrapperProps<T extends ToolName> = { toolMessage: Exclude<ToolMessage<T>, { type: 'invalid_params' }>, messageIdx: number, threadId: string }
@@ -2210,6 +2325,15 @@ const builtinToolNameToComponent: { [T in BuiltinToolName]: { resultWrapper: Res
 			return <ToolHeaderWrapper {...componentParams} />;
 		}
 	},
+	'read_symbol': {
+		resultWrapper: (params) => <GenericBuiltinTool {...params} />,
+	},
+	'find_references': {
+		resultWrapper: (params) => <GenericBuiltinTool {...params} />,
+	},
+	'go_to_definition': {
+		resultWrapper: (params) => <GenericBuiltinTool {...params} />,
+	},
 
 	'read_lint_errors': {
 		resultWrapper: ({ toolMessage }) => {
@@ -2360,6 +2484,42 @@ const builtinToolNameToComponent: { [T in BuiltinToolName]: { resultWrapper: Res
 		resultWrapper: (params) => {
 			return <CommandTool {...params} type='run_command' />
 		}
+	},
+	'run_tests': {
+		resultWrapper: (params) => <GenericBuiltinTool {...params} />,
+	},
+	'install_dependencies': {
+		resultWrapper: (params) => <GenericBuiltinTool {...params} />,
+	},
+	'git_status': {
+		resultWrapper: (params) => <GenericBuiltinTool {...params} />,
+	},
+	'git_diff': {
+		resultWrapper: (params) => <GenericBuiltinTool {...params} />,
+	},
+	'git_apply_patch': {
+		resultWrapper: (params) => <GenericBuiltinTool {...params} />,
+	},
+	'git_create_branch': {
+		resultWrapper: (params) => <GenericBuiltinTool {...params} />,
+	},
+	'git_commit': {
+		resultWrapper: (params) => <GenericBuiltinTool {...params} />,
+	},
+	'git_worktree_create': {
+		resultWrapper: (params) => <GenericBuiltinTool {...params} />,
+	},
+	'git_worktree_delete': {
+		resultWrapper: (params) => <GenericBuiltinTool {...params} />,
+	},
+	'package_script_list': {
+		resultWrapper: (params) => <GenericBuiltinTool {...params} />,
+	},
+	'review_snapshot': {
+		resultWrapper: (params) => <GenericBuiltinTool {...params} />,
+	},
+	'read_test_failures': {
+		resultWrapper: (params) => <GenericBuiltinTool {...params} />,
 	},
 
 	'run_persistent_command': {

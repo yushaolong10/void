@@ -44,6 +44,7 @@ import { IBrowserAgentBridge, createLegacyToolInvocation } from './agent/Browser
 import { AgentRun } from '../common/agent/runtime/AgentRun.js';
 import { ToolContext } from '../common/agent/tools/ToolDefinition.js';
 import { IAgentExtensionService } from './agent/AgentExtensionService.js';
+import { PermissionDecision } from '../common/agent/permissions/PermissionDecision.js';
 
 
 // related to retrying when LLM message has error
@@ -65,7 +66,7 @@ const parallelReadonlyBuiltinTools = new Set<string>([
 	'git_status',
 	'git_diff',
 	'package_script_list',
-	'subagent_review',
+	'review_snapshot',
 	'read_test_failures',
 ])
 
@@ -741,6 +742,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 	private _exclusiveToolWriteLock: Promise<void> = Promise.resolve()
 	private readonly _agentRunOfThreadId = new Map<string, AgentRun>()
 	private readonly _pendingAgentToolInvocationOfChatToolId = new Map<string, { invocation: ReturnType<typeof createLegacyToolInvocation>; ctx: ToolContext }>()
+	private readonly _rememberedPermissionApprovalKeysByThreadId = new Map<string, Set<string>>()
 
 
 	private _canRunInReadonlyBatch(toolName: ToolName) {
@@ -861,6 +863,116 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 		catch {
 			// Hooks are user automation; failures should not corrupt the agent control flow.
 		}
+	}
+
+	private _canAutoApprovePermissionDecision(decision: PermissionDecision): boolean {
+		return decision.type !== 'ask' || (decision.risk !== 'high' && decision.risk !== 'critical')
+	}
+
+	private _permissionRequestContent(decision: PermissionDecision): string {
+		if (decision.type !== 'ask') return '(Awaiting user permission...)'
+		const preview = decision.preview?.type === 'list'
+			? `\n${decision.preview.items.map(item => `- ${item}`).join('\n')}`
+			: decision.preview?.type === 'code'
+				? `\n${decision.preview.value}`
+				: ''
+		return `${decision.reason}${preview}`
+	}
+
+	private _rememberedPermissionApprovalKeys(threadId: string): Set<string> {
+		let keys = this._rememberedPermissionApprovalKeysByThreadId.get(threadId)
+		if (!keys) {
+			keys = new Set<string>()
+			this._rememberedPermissionApprovalKeysByThreadId.set(threadId, keys)
+		}
+		return keys
+	}
+
+	private _rememberPermissionApproval(threadId: string, toolName: ToolName, toolParams: ToolCallParams<ToolName>): void {
+		const key = this._permissionApprovalKey(toolName, toolParams)
+		if (!key) return
+		this._rememberedPermissionApprovalKeys(threadId).add(key)
+	}
+
+	private _hasRememberedPermissionApproval(threadId: string, toolName: ToolName, toolParams: ToolCallParams<ToolName>): boolean {
+		const key = this._permissionApprovalKey(toolName, toolParams)
+		if (!key) return false
+		return this._rememberedPermissionApprovalKeys(threadId).has(key)
+	}
+
+	private _permissionApprovalKey(toolName: ToolName, toolParams: ToolCallParams<ToolName>): string | null {
+		if (toolName === 'run_command') {
+			const { command, cwd } = toolParams as BuiltinToolCallParams['run_command']
+			const family = this._terminalCommandApprovalFamily(command)
+			return family ? `terminal:${family}:cwd=${cwd ?? ''}` : null
+		}
+		if (toolName === 'run_persistent_command') {
+			const { command, persistentTerminalId } = toolParams as BuiltinToolCallParams['run_persistent_command']
+			const family = this._terminalCommandApprovalFamily(command)
+			return family ? `persistent-terminal:${family}:terminal=${persistentTerminalId}` : null
+		}
+		if (toolName === 'git_commit') {
+			const { cwd } = toolParams as BuiltinToolCallParams['git_commit']
+			return `git:commit:cwd=${cwd ?? ''}`
+		}
+		if (toolName === 'git_create_branch') {
+			const { cwd } = toolParams as BuiltinToolCallParams['git_create_branch']
+			return `git:create-branch:cwd=${cwd ?? ''}`
+		}
+		if (toolName === 'git_apply_patch') {
+			const { cwd, checkOnly } = toolParams as BuiltinToolCallParams['git_apply_patch']
+			return `git:apply-patch:${checkOnly ? 'check' : 'apply'}:cwd=${cwd ?? ''}`
+		}
+		if (toolName === 'git_worktree_create') {
+			const { cwd } = toolParams as BuiltinToolCallParams['git_worktree_create']
+			return `git:worktree-create:cwd=${cwd ?? ''}`
+		}
+		if (toolName === 'git_worktree_delete') {
+			const { cwd, path } = toolParams as BuiltinToolCallParams['git_worktree_delete']
+			return `git:worktree-delete:cwd=${cwd ?? ''}:path=${path}`
+		}
+		if (toolName === 'install_dependencies') {
+			const { command, cwd } = toolParams as BuiltinToolCallParams['install_dependencies']
+			return `deps:${this._packageCommandApprovalFamily(command) ?? 'install'}:cwd=${cwd ?? ''}`
+		}
+		return null
+	}
+
+	private _terminalCommandApprovalFamily(command: string): string | null {
+		const normalized = command.toLowerCase().trim()
+		if (/\brm\s+-rf\b/.test(normalized)) return 'delete:rm-rf'
+		if (/\bsudo\b/.test(normalized)) return 'system:sudo'
+		if (/\bchmod\s+[-+]?[0-7]*777\b/.test(normalized)) return 'system:chmod-777'
+		if (/\bchown\b/.test(normalized)) return 'system:chown'
+		if (/\bmkfs\b/.test(normalized)) return 'system:mkfs'
+		if (/\bdd\b/.test(normalized)) return 'system:dd'
+		if (/\bgit\s+reset\b/.test(normalized)) return 'git:reset'
+		if (/\bgit\s+clean\b/.test(normalized)) return 'git:clean'
+		if (/\bgit\s+push\b/.test(normalized)) return 'git:push'
+		if (/\bgit\s+branch\s+-d\b/i.test(command) || /\bgit\s+branch\s+-D\b/.test(command)) return 'git:delete-branch'
+		if (/\bgit\s+worktree\s+remove\b/.test(normalized)) return 'git:worktree-remove'
+		if (/\bgit\s+commit\b/.test(normalized)) return 'git:commit'
+		if (/\bgit\s+(checkout\s+-b|switch\s+-c)\b/.test(normalized)) return 'git:create-branch'
+		if (/\bgit\s+apply\b/.test(normalized)) return 'git:apply-patch'
+		if (/\bgit\s+am\b/.test(normalized)) return 'git:am'
+		if (/\bgit\s+merge\b/.test(normalized)) return 'git:merge'
+		if (/\bgit\s+rebase\b/.test(normalized)) return 'git:rebase'
+		if (/\bgit\s+cherry-pick\b/.test(normalized)) return 'git:cherry-pick'
+		if (/\bgit\s+tag\b/.test(normalized)) return 'git:tag'
+		if (/\b(curl|wget)\b.*\|\s*(sh|bash|zsh|fish)\b/.test(normalized)) return 'network:download-execute'
+		if (/\b(curl|wget)\b/.test(normalized)) return 'network:download'
+		const packageFamily = this._packageCommandApprovalFamily(command)
+		if (packageFamily) return `deps:${packageFamily}`
+		return null
+	}
+
+	private _packageCommandApprovalFamily(command: string): string | null {
+		const normalized = command.toLowerCase().trim()
+		if (/\b(npm|pnpm|yarn|bun)\s+(install|add|remove|update|upgrade)\b/.test(normalized)) return 'js-package-manager'
+		if (/\b(pip|pip3|uv|poetry)\s+(install|add|remove|update)\b/.test(normalized)) return 'python-package-manager'
+		if (/\bcargo\s+(install|add|remove|update)\b/.test(normalized)) return 'rust-package-manager'
+		if (/\bgo\s+get\b/.test(normalized)) return 'go-package-manager'
+		return null
 	}
 
 	private _runReadonlyToolBatch = async (
@@ -1065,15 +1177,21 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 
 				const approvalType = isBuiltInTool ? approvalTypeOfBuiltinToolName[toolName] : 'MCP tools'
 				if (permissionDecision.type === 'ask' || approvalType) {
-					const autoApprove = approvalType ? this._settingsService.state.globalSettings.autoApprove[approvalType] : false
-					// add a tool_request because we use it for UI if a tool is loading (this should be improved in the future)
-					this._addMessageToThread(threadId, { role: 'tool', type: 'tool_request', content: '(Awaiting user permission...)', result: null, name: toolName, params: toolParams, id: toolId, rawParams: opts.unvalidatedToolParams, mcpServerName })
-					if (permissionDecision.type === 'ask' && !autoApprove) {
-						this._pendingAgentToolInvocationOfChatToolId.set(toolId, { invocation: toolInvocation, ctx: toolCtx })
-						this._agentBridge.recordPermissionRequired(toolInvocation.callId, permissionDecision, toolCtx)
-						return { awaitingUserApproval: true }
+					if (permissionDecision.type === 'ask' && this._hasRememberedPermissionApproval(threadId, toolName, toolParams)) {
+						this._agentBridge.recordPermissionResolved(toolInvocation.callId, { type: 'allow', reason: `A similar ${permissionDecision.risk}-risk "${toolName}" action was already approved in this thread.` }, toolCtx)
 					}
-					this._agentBridge.recordPermissionResolved(toolInvocation.callId, { type: 'allow', reason: permissionDecision.type === 'ask' ? `Tool "${toolName}" was auto-approved by Void settings.` : permissionDecision.reason }, toolCtx)
+					else {
+						const autoApprove = approvalType ? this._settingsService.state.globalSettings.autoApprove[approvalType] : false
+						const canAutoApprove = autoApprove && this._canAutoApprovePermissionDecision(permissionDecision)
+						// add a tool_request because we use it for UI if a tool is loading (this should be improved in the future)
+						this._addMessageToThread(threadId, { role: 'tool', type: 'tool_request', content: this._permissionRequestContent(permissionDecision), result: null, name: toolName, params: toolParams, id: toolId, rawParams: opts.unvalidatedToolParams, mcpServerName })
+						if (permissionDecision.type === 'ask' && !canAutoApprove) {
+							this._pendingAgentToolInvocationOfChatToolId.set(toolId, { invocation: toolInvocation, ctx: toolCtx })
+							this._agentBridge.recordPermissionRequired(toolInvocation.callId, permissionDecision, toolCtx)
+							return { awaitingUserApproval: true }
+						}
+						this._agentBridge.recordPermissionResolved(toolInvocation.callId, { type: 'allow', reason: permissionDecision.type === 'ask' ? `Tool "${toolName}" was auto-approved by Void settings.` : permissionDecision.reason }, toolCtx)
+					}
 				}
 				else {
 					this._agentBridge.recordPermissionResolved(toolInvocation.callId, permissionDecision, toolCtx)
@@ -1090,6 +1208,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 					toolInvocation = createLegacyToolInvocation(toolName, toolParams, opts.unvalidatedToolParams)
 					this._agentBridge.recordToolRequested(toolInvocation, toolCtx)
 				}
+				this._rememberPermissionApproval(threadId, toolName, toolParams)
 				this._agentBridge.recordPermissionResolved(toolInvocation.callId, { type: 'allow', reason: `Tool "${toolName}" was approved by the user.` }, toolCtx)
 			}
 
@@ -1193,7 +1312,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 			if (toolName === 'edit_file' || toolName === 'rewrite_file' || toolName === 'create_file_or_folder' || toolName === 'delete_file_or_folder' || toolName === 'git_apply_patch') {
 				await this._runAgentHookSafely({ event: 'after_file_edit', toolCall: toolInvocation, toolResult: { ok: true, data: toolResult }, metadata: { threadId, toolId, toolName } })
 			}
-			if (toolName === 'run_command' || toolName === 'run_tests' || toolName === 'install_dependencies' || toolName === 'run_persistent_command' || toolName === 'git_status' || toolName === 'git_diff' || toolName === 'git_apply_patch' || toolName === 'git_create_branch' || toolName === 'git_commit' || toolName === 'package_script_list' || toolName === 'subagent_review' || toolName === 'git_worktree_create' || toolName === 'git_worktree_delete') {
+			if (toolName === 'run_command' || toolName === 'run_tests' || toolName === 'install_dependencies' || toolName === 'run_persistent_command' || toolName === 'git_status' || toolName === 'git_diff' || toolName === 'git_apply_patch' || toolName === 'git_create_branch' || toolName === 'git_commit' || toolName === 'package_script_list' || toolName === 'review_snapshot' || toolName === 'git_worktree_create' || toolName === 'git_worktree_delete') {
 				await this._runAgentHookSafely({ event: 'after_run_command', toolCall: toolInvocation, toolResult: { ok: true, data: toolResult }, metadata: { threadId, toolId, toolName } })
 			}
 			return {}

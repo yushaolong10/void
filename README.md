@@ -45,5 +45,27 @@ For a local macOS ARM packaging guide, see [MacPack](./MacPack.md).
 
 
 
+## Development
+
+You can run the development build like this:
+
+```shell
+npm run watch
+```
+
+Open another terminal:
+
+```shell
+./scripts/code.sh
+```
+
+If you just want to quickly launch and see it, you can also try:
+
+```shell
+./scripts/code.sh
+```
+
+But it's recommended to run `npm run watch` first, as this is the standard development workflow for a VSCode/Void fork — changes are continuously compiled.
+
 ## Support
 You can always reach us in our Discord server or contact us via email: hello@voideditor.com.

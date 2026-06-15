@@ -21,7 +21,7 @@ import { generateUuid } from '../../../../base/common/uuid.js'
 import { extractSearchReplaceBlocks } from '../common/helpers/extractCodeFromResult.js'
 import { IBrowserAgentBridge, createLegacyToolInvocation } from './agent/BrowserAgentBridge.js'
 import { ToolRisk } from '../common/agent/tools/ToolDefinition.js'
-import { SubagentManager } from '../common/agent/execution/SubagentManager.js'
+import { ReviewSnapshotManager } from '../common/agent/execution/ReviewSnapshotManager.js'
 import { WorktreeManager } from '../common/agent/execution/WorktreeManager.js'
 import { safeStringify } from '../common/agent/tools/safeSerialize.js'
 
@@ -187,7 +187,7 @@ export class ToolsService implements IToolsService {
 	public validateParams: ValidateBuiltinParams;
 	public callTool: CallBuiltinTool;
 	public stringOfResult: BuiltinToolResultToString;
-	private readonly subagentManager = new SubagentManager();
+	private readonly reviewSnapshotManager = new ReviewSnapshotManager();
 	private readonly worktreeManager = new WorktreeManager();
 
 	constructor(
@@ -387,7 +387,7 @@ export class ToolsService implements IToolsService {
 				return { cwd }
 			},
 
-			subagent_review: (params: RawToolParamsObj) => {
+			review_snapshot: (params: RawToolParamsObj) => {
 				const { cwd: cwdUnknown, goal: goalUnknown, include_diff: includeDiffUnknown } = params
 				const cwd = validateOptionalStr('cwd', cwdUnknown)
 				const goal = validateOptionalStr('goal', goalUnknown) ?? 'Review the current workspace changes for risk.'
@@ -674,7 +674,8 @@ export class ToolsService implements IToolsService {
 				const { resPromise, interrupt } = await this.terminalToolService.runCommand(command, { type: 'temporary', cwd, terminalId })
 				const result = resPromise.then(result => {
 					this.worktreeManager.update(id, { status: result.resolveReason.type === 'done' && result.resolveReason.exitCode === 0 ? 'ready' : 'failed', error: result.resolveReason.type === 'done' && result.resolveReason.exitCode === 0 ? undefined : result.result })
-					return { id, path, branchName, ...result }
+					const status = result.resolveReason.type === 'done' && result.resolveReason.exitCode === 0 ? 'ready' as const : 'failed' as const
+					return { id, path, branchName, status, ...result }
 				})
 				return { result, interruptTool: interrupt }
 			},
@@ -683,7 +684,12 @@ export class ToolsService implements IToolsService {
 				const terminalId = generateUuid()
 				const command = `git worktree remove ${shellQuote(path)}${prune ? ` && git worktree prune` : ''}`
 				const { resPromise, interrupt } = await this.terminalToolService.runCommand(command, { type: 'temporary', cwd, terminalId })
-				const result = resPromise.then(result => ({ path, ...result }))
+				const result = resPromise.then(result => {
+					const status = result.resolveReason.type === 'done' && result.resolveReason.exitCode === 0 ? 'deleted' as const : 'failed' as const
+					const tracked = this.worktreeManager.findByPath(path)
+					if (tracked) this.worktreeManager.update(tracked.id, { status, error: status === 'failed' ? result.result : undefined })
+					return { path, status, ...result }
+				})
 				return { result, interruptTool: interrupt }
 			},
 
@@ -694,11 +700,10 @@ export class ToolsService implements IToolsService {
 				return { result: resPromise, interruptTool: interrupt }
 			},
 
-			subagent_review: async ({ cwd, goal, includeDiff }) => {
+			review_snapshot: async ({ cwd, goal, includeDiff }) => {
 				const id = generateUuid().slice(0, 8)
-				this.subagentManager.track({
+				this.reviewSnapshotManager.track({
 					id,
-					kind: 'review',
 					goal,
 					status: 'running',
 				})
@@ -719,7 +724,7 @@ export class ToolsService implements IToolsService {
 				const { resPromise, interrupt } = await this.terminalToolService.runCommand(command, { type: 'temporary', cwd, terminalId })
 				const result = resPromise.then(result => {
 					const ok = result.resolveReason.type === 'done' && result.resolveReason.exitCode === 0
-					this.subagentManager.update(id, {
+					this.reviewSnapshotManager.update(id, {
 						status: ok ? 'complete' : 'failed',
 						summary: result.result.slice(0, 4000),
 					})
@@ -832,7 +837,7 @@ export class ToolsService implements IToolsService {
 			git_worktree_create: 'execute',
 			git_worktree_delete: 'execute',
 			package_script_list: 'read',
-			subagent_review: 'read',
+			review_snapshot: 'read',
 			read_test_failures: 'read',
 			rewrite_file: 'write',
 			edit_file: 'write',
@@ -1004,8 +1009,8 @@ export class ToolsService implements IToolsService {
 			package_script_list: (_params, result) => {
 				return stringifyTemporaryTerminalResult(result)
 			},
-			subagent_review: (_params, result) => {
-				return `Read-only review subagent ${result.id}\nGoal: ${result.goal}\n${stringifyTemporaryTerminalResult(result)}`
+			review_snapshot: (_params, result) => {
+				return `Read-only review snapshot ${result.id}\nGoal: ${result.goal}\n${stringifyTemporaryTerminalResult(result)}`
 			},
 			read_test_failures: (_params, result) => {
 				if (result.failures.length === 0) return 'No obvious test failures found in the provided output.'

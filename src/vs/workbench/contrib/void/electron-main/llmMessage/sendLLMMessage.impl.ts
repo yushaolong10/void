@@ -660,8 +660,10 @@ const sendAnthropicChat = async ({ messages, providerName, onText, onFinalMessag
 		const tools = response.content.filter(c => c.type === 'tool_use')
 		// console.log('TOOLS!!!!!!', JSON.stringify(tools, null, 2))
 		// console.log('TOOLS!!!!!!', JSON.stringify(response, null, 2))
-		const toolCall = tools[0] && rawToolCallObjOfAnthropicParams(tools[0])
-		const toolCallObj = toolCall ? { toolCall } : {}
+		const toolCalls = tools
+			.map(tool => rawToolCallObjOfAnthropicParams(tool))
+			.filter((toolCall): toolCall is RawToolCallObj => !!toolCall)
+		const toolCallObj = toolCalls.length > 0 ? { toolCall: toolCalls[0], toolCalls } : {}
 
 		onFinalMessage({ fullText, fullReasoning, anthropicReasoning, ...toolCallObj })
 	})

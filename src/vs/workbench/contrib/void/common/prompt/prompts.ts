@@ -160,7 +160,7 @@ const paginationParam = {
 
 
 
-const terminalDescHelper = `Run terminal commands for inspection or verification only, such as sed, grep, tests, builds, type checks, format checks, and benchmarks. Do not modify files with this tool; use edit_file for edits. Choose the smallest command that reduces uncertainty. For commands that may run for a long time or produce delayed output, such as tests, builds, installs, migrations, dev servers, or watchers, open a persistent terminal first and run the command there. For commands that may open an interactive editor or pager, such as git diff, pipe output to cat or use a non-interactive flag.`
+const terminalDescHelper = `Run terminal commands for inspection or verification only, such as sed, grep, one-off diagnostics, format checks, and benchmarks. Prefer purpose-built tools for supported actions: use edit_file/rewrite_file for file edits, git_status/git_diff/git_apply_patch/git_create_branch/git_commit/git_worktree_create/git_worktree_delete for git operations, run_tests for tests/builds/type checks/lints, install_dependencies for dependency installs, and package_script_list for package scripts. Use run_command only as a fallback when no purpose-built tool covers the command. Choose the smallest command that reduces uncertainty. For commands that may run for a long time or produce delayed output, such as dev servers or watchers, open a persistent terminal first and run the command there. For commands that may open an interactive editor or pager, pipe output to cat or use a non-interactive flag.`
 
 const cwdHelper = 'Optional. The directory in which to run the command. Defaults to the first workspace folder.'
 
@@ -370,9 +370,9 @@ export const builtinTools: {
 		},
 	},
 
-	subagent_review: {
-		name: 'subagent_review',
-		description: `Runs a read-only review lane over the current workspace state. It collects git status, diff stats, whitespace checks, and optionally the full diff for risk review without editing files.`,
+	review_snapshot: {
+		name: 'review_snapshot',
+		description: `Collects a read-only review snapshot of the current workspace state. It gathers git status, diff stats, whitespace checks, and optionally the full diff for risk review without editing files. This is not a separate agent.`,
 		params: {
 			cwd: { description: cwdHelper },
 			goal: { description: 'The review focus, such as "check regression risk before commit".' },
@@ -551,15 +551,17 @@ const systemToolsXMLPrompt = (chatMode: ChatMode, mcpTools: InternalToolInfo[] |
 	const toolCallXMLGuidelines = (`\
     Tool calling contract:
     - Use a tool only when it directly helps complete the user's request.
+    - Prefer the most specific purpose-built tool available. Use terminal tools only as a fallback when no dedicated tool covers the action.
+    - Do not use run_command or run_persistent_command for supported file edits, git operations, package script discovery, dependency installs, tests, builds, lints, or type checks; use the dedicated tool for that action instead.
     - If you call a tool, output ONLY the XML tool call. Do not write any prose, markdown, explanation, or purpose sentence before or after it.
     - The XML root tag must be exactly the tool name, for example <ls_dir>...</ls_dir>.
     - Do NOT wrap tool calls in generic tags such as <tool_call name="ls_dir">...</tool_call>.
     - Do NOT put tool XML inside markdown code fences.
     - You may call multiple tools in one response when every call is independent and safe to run concurrently.
-    - Prefer batching independent read/search/list tools such as read_file, ls_dir, get_dir_tree, search_pathnames_only, search_for_files, and search_in_file.
+    - Prefer batching independent read/search/list/snapshot tools such as read_file, ls_dir, get_dir_tree, search_pathnames_only, search_for_files, search_in_file, read_symbol, find_references, go_to_definition, read_lint_errors, git_status, git_diff, package_script_list, review_snapshot, and read_test_failures.
     - You may also batch independent write tools when they affect different files or parent directories.
     - Do not batch tools when a later tool depends on an earlier result.
-    - Do not batch delete operations, terminal commands, MCP tools, or multiple writes to the same file.
+    - Do not batch delete operations, raw terminal tools such as run_command or run_persistent_command, MCP tools, or multiple writes to the same file. Dedicated read-only tools may be batched even if they are implemented using terminal commands internally.
     - After outputting the closing tag for the final tool call, stop immediately and wait for the tool results.
     - All parameters are required unless their description says Optional.
     - Parameter values are plain text. Do NOT include XML tags, closing tags, partial tags, or markdown fences inside parameter values.
@@ -695,7 +697,8 @@ ${activeURI}
 		details.push(`Use search_in_file after identifying a likely file and needing exact occurrences.`)
 		details.push(`Use get_dir_tree for focused directories when structure matters; avoid broad tree exploration when targeted search is enough.`)
 		details.push(`Use read_file for relevant source, tests, and configuration. Prefer targeted ranges when exact line numbers are known.`)
-		details.push(`Use run_command for inspection and verification, not for editing files. Run the smallest command that meaningfully reduces uncertainty.`)
+		details.push(`Prefer purpose-built tools over terminal commands: use git_status/git_diff for git inspection, git_apply_patch/git_create_branch/git_commit/git_worktree_create/git_worktree_delete for git actions, package_script_list for package scripts, run_tests for tests/builds/lints/type checks, and install_dependencies for dependency installs.`)
+		details.push(`Use run_command only as a fallback for inspection or verification commands that do not have a dedicated tool. Do not use terminal commands for file edits or supported git/package/test actions.`)
 	}
 	else {
 		details.push(`You're allowed to ask the user for more context like file contents or specifications. If this comes up, tell them to reference files and folders by typing @.`)
