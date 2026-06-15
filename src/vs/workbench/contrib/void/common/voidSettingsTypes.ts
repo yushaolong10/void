@@ -497,7 +497,7 @@ export const defaultGlobalSettings: GlobalSettings = {
 	syncSCMToChat: true,
 	enableFastApply: true,
 	chatMode: 'agent',
-	autoApprove: {},
+	autoApprove: { edits: true, terminal: true },
 	showInlineSuggestions: true,
 	includeToolLintErrors: true,
 	parallelReadonlyTools: true,

@@ -866,7 +866,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 	}
 
 	private _canAutoApprovePermissionDecision(decision: PermissionDecision): boolean {
-		return decision.type !== 'ask' || (decision.risk !== 'high' && decision.risk !== 'critical')
+		return decision.risk !== 'critical' // 仅 critical 需要手动审批
 	}
 
 	private _permissionRequestContent(decision: PermissionDecision): string {
