@@ -13,7 +13,7 @@ import { IStorageService, StorageScope, StorageTarget } from '../../../../platfo
 import { IMetricsService } from './metricsService.js';
 import { defaultProviderSettings, getModelCapabilities, ModelOverrides } from './modelCapabilities.js';
 import { VOID_SETTINGS_STORAGE_KEY } from './storageKeys.js';
-import { defaultSettingsOfProvider, FeatureName, ProviderName, ModelSelectionOfFeature, SettingsOfProvider, SettingName, providerNames, ModelSelection, modelSelectionsEqual, featureNames, VoidStatefulModelInfo, GlobalSettings, GlobalSettingName, defaultGlobalSettings, ModelSelectionOptions, OptionsOfModelSelection, ChatMode, OverridesOfModel, defaultOverridesOfModel, MCPUserStateOfName as MCPUserStateOfName, MCPUserState } from './voidSettingsTypes.js';
+import { defaultSettingsOfProvider, FeatureName, ProviderName, ModelSelectionOfFeature, SettingsOfProvider, SettingName, providerNames, ModelSelection, modelSelectionsEqual, featureNames, VoidStatefulModelInfo, GlobalSettings, GlobalSettingName, defaultGlobalSettings, ModelSelectionOptions, OptionsOfModelSelection, ChatMode, OverridesOfModel, defaultOverridesOfModel, MCPUserStateOfName as MCPUserStateOfName, MCPUserState, isOpenAICompatibleProviderName } from './voidSettingsTypes.js';
 
 
 // name is the name in the dropdown
@@ -328,8 +328,11 @@ class VoidSettingsService extends Disposable implements IVoidSettingsService {
 				}
 
 				// remove when enough people have had it run (default is now {})
-				if (providerName === 'openAICompatible' && !readS.settingsOfProvider[providerName].headersJSON) {
+				if (isOpenAICompatibleProviderName(providerName) && !readS.settingsOfProvider[providerName].headersJSON) {
 					readS.settingsOfProvider[providerName].headersJSON = '{}'
+				}
+				if (isOpenAICompatibleProviderName(providerName) && !readS.settingsOfProvider[providerName].responseFormat) {
+					readS.settingsOfProvider[providerName].responseFormat = 'tool-call'
 				}
 			}
 		}

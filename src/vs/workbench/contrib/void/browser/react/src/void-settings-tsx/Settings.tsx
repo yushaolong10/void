@@ -629,6 +629,28 @@ const ProviderSetting = ({ providerName, settingName, subTextMd }: { providerNam
 		voidSettingsService.setSettingOfProvider(providerName, settingName, newVal)
 	}, [voidSettingsService, providerName, settingName]);
 
+	if (settingName === 'responseFormat') {
+		const options = ['xml', 'tool-call'] as const
+		const selectedOption = options.find(option => option === settingValue) ?? 'tool-call'
+		return <ErrorBoundary>
+			<div className='my-1'>
+				<div className='px-3 py-1 opacity-70 text-sm'>{settingTitle}</div>
+				<VoidCustomDropdownBox
+					options={options}
+					selectedOption={selectedOption}
+					onChangeOption={(newVal) => handleChangeValue(newVal)}
+					getOptionDisplayName={(option) => option}
+					getOptionDropdownName={(option) => option}
+					getOptionsEqual={(a, b) => a === b}
+					className='w-full'
+				/>
+				{!subTextMd ? null : <div className='py-1 px-3 opacity-50 text-sm'>
+					{subTextMd}
+				</div>}
+			</div>
+		</ErrorBoundary>
+	}
+
 	return <ErrorBoundary>
 		<div className='my-1'>
 			<VoidSimpleInputBox

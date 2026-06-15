@@ -15,6 +15,8 @@ type UnionOfKeys<T> = T extends T ? keyof T : never;
 
 export type ProviderName = keyof typeof defaultProviderSettings
 export const providerNames = Object.keys(defaultProviderSettings) as ProviderName[]
+export const openAICompatibleProviderNames = ['openAICompatible', 'openAICompatible1', 'openAICompatible2', 'openAICompatible3'] as const satisfies ProviderName[]
+export const isOpenAICompatibleProviderName = (providerName: ProviderName): providerName is typeof openAICompatibleProviderNames[number] => (openAICompatibleProviderNames as readonly string[]).includes(providerName)
 
 export const localProviderNames = ['ollama', 'vLLM', 'lmStudio'] satisfies ProviderName[] // all local names
 export const nonlocalProviderNames = providerNames.filter((name) => !(localProviderNames as string[]).includes(name)) // all non-local names
@@ -85,6 +87,15 @@ export const displayInfoOfProviderName = (providerName: ProviderName): DisplayIn
 	else if (providerName === 'openAICompatible') {
 		return { title: 'OpenAI-Compatible', }
 	}
+	else if (providerName === 'openAICompatible1') {
+		return { title: 'OpenAI-Compatible-1', }
+	}
+	else if (providerName === 'openAICompatible2') {
+		return { title: 'OpenAI-Compatible-2', }
+	}
+	else if (providerName === 'openAICompatible3') {
+		return { title: 'OpenAI-Compatible-3', }
+	}
 	else if (providerName === 'gemini') {
 		return { title: 'Gemini', }
 	}
@@ -120,7 +131,7 @@ export const subTextMdOfProviderName = (providerName: ProviderName): string => {
 	if (providerName === 'groq') return 'Get your [API Key here](https://console.groq.com/keys).'
 	if (providerName === 'xAI') return 'Get your [API Key here](https://console.x.ai).'
 	if (providerName === 'mistral') return 'Get your [API Key here](https://console.mistral.ai/api-keys).'
-	if (providerName === 'openAICompatible') return `Use any provider that's OpenAI-compatible (use this for llama.cpp and more).`
+	if (isOpenAICompatibleProviderName(providerName)) return `Use any provider that's OpenAI-compatible. Set Response Format to tool-call for endpoints with native OpenAI tools, or xml for prompt-parsed tools.`
 	if (providerName === 'googleVertex') return 'You must authenticate before using Vertex with Void. Read more about endpoints [here](https://cloud.google.com/vertex-ai/generative-ai/docs/multimodal/call-vertex-using-openai-library), and regions [here](https://cloud.google.com/vertex-ai/docs/general/locations#available-regions).'
 	if (providerName === 'microsoftAzure') return 'Read more about endpoints [here](https://learn.microsoft.com/en-us/rest/api/aifoundry/model-inference/get-chat-completions/get-chat-completions?view=rest-aifoundry-model-inference-2024-05-01-preview&tabs=HTTP), and get your API key [here](https://learn.microsoft.com/en-us/azure/search/search-security-api-keys?tabs=rest-use%2Cportal-find%2Cportal-query#find-existing-keys).'
 	if (providerName === 'awsBedrock') return 'Connect via a LiteLLM proxy or the AWS [Bedrock-Access-Gateway](https://github.com/aws-samples/bedrock-access-gateway). LiteLLM Bedrock setup docs are [here](https://docs.litellm.ai/docs/providers/bedrock).'
@@ -150,7 +161,7 @@ export const displayInfoOfSettingName = (providerName: ProviderName, settingName
 						providerName === 'openRouter' ? 'sk-or-key...' : // sk-or-v1-key
 							providerName === 'gemini' ? 'AIzaSy...' :
 								providerName === 'groq' ? 'gsk_key...' :
-									providerName === 'openAICompatible' ? 'sk-key...' :
+									isOpenAICompatibleProviderName(providerName) ? 'sk-key...' :
 										providerName === 'xAI' ? 'xai-key...' :
 											providerName === 'mistral' ? 'api-key...' :
 												providerName === 'googleVertex' ? 'AIzaSy...' :
@@ -166,7 +177,7 @@ export const displayInfoOfSettingName = (providerName: ProviderName, settingName
 			title: providerName === 'ollama' ? 'Endpoint' :
 				providerName === 'vLLM' ? 'Endpoint' :
 					providerName === 'lmStudio' ? 'Endpoint' :
-						providerName === 'openAICompatible' ? 'baseURL' : // (do not include /chat/completions)
+						isOpenAICompatibleProviderName(providerName) ? 'baseURL' : // (do not include /chat/completions)
 							providerName === 'googleVertex' ? 'baseURL' :
 								providerName === 'microsoftAzure' ? 'baseURL' :
 									providerName === 'liteLLM' ? 'baseURL' :
@@ -175,7 +186,7 @@ export const displayInfoOfSettingName = (providerName: ProviderName, settingName
 
 			placeholder: providerName === 'ollama' ? defaultProviderSettings.ollama.endpoint
 				: providerName === 'vLLM' ? defaultProviderSettings.vLLM.endpoint
-					: providerName === 'openAICompatible' ? 'https://my-website.com/v1'
+					: isOpenAICompatibleProviderName(providerName) ? 'https://my-website.com/v1'
 						: providerName === 'lmStudio' ? defaultProviderSettings.lmStudio.endpoint
 							: providerName === 'liteLLM' ? 'http://localhost:4000'
 								: providerName === 'awsBedrock' ? 'http://localhost:4000/v1'
@@ -186,6 +197,9 @@ export const displayInfoOfSettingName = (providerName: ProviderName, settingName
 	}
 	else if (settingName === 'headersJSON') {
 		return { title: 'Custom Headers', placeholder: '{ "X-Request-Id": "..." }' }
+	}
+	else if (settingName === 'responseFormat') {
+		return { title: 'Response Format', placeholder: 'tool-call' }
 	}
 	else if (settingName === 'region') {
 		// vertex only
@@ -241,6 +255,7 @@ const defaultCustomSettings: Record<CustomSettingName, undefined> = {
 	project: undefined,
 	azureApiVersion: undefined,
 	headersJSON: undefined,
+	responseFormat: undefined,
 }
 
 
@@ -320,6 +335,24 @@ export const defaultSettingsOfProvider: SettingsOfProvider = {
 		...defaultCustomSettings,
 		...defaultProviderSettings.openAICompatible,
 		...modelInfoOfDefaultModelNames(defaultModelsOfProvider.openAICompatible),
+		_didFillInProviderSettings: undefined,
+	},
+	openAICompatible1: {
+		...defaultCustomSettings,
+		...defaultProviderSettings.openAICompatible1,
+		...modelInfoOfDefaultModelNames(defaultModelsOfProvider.openAICompatible1),
+		_didFillInProviderSettings: undefined,
+	},
+	openAICompatible2: {
+		...defaultCustomSettings,
+		...defaultProviderSettings.openAICompatible2,
+		...modelInfoOfDefaultModelNames(defaultModelsOfProvider.openAICompatible2),
+		_didFillInProviderSettings: undefined,
+	},
+	openAICompatible3: {
+		...defaultCustomSettings,
+		...defaultProviderSettings.openAICompatible3,
+		...modelInfoOfDefaultModelNames(defaultModelsOfProvider.openAICompatible3),
 		_didFillInProviderSettings: undefined,
 	},
 	ollama: { // aggregator (serves models from multiple providers)

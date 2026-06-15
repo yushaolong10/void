@@ -5,6 +5,13 @@
 
 import { FeatureName, ModelSelectionOptions, OverridesOfModel, ProviderName } from './voidSettingsTypes.js';
 
+const openAICompatibleProviderSettings = {
+	endpoint: '',
+	apiKey: '',
+	headersJSON: '{}', // default to {}
+	responseFormat: 'tool-call',
+} as const
+
 
 
 
@@ -29,9 +36,16 @@ export const defaultProviderSettings = {
 		apiKey: '',
 	},
 	openAICompatible: {
-		endpoint: '',
-		apiKey: '',
-		headersJSON: '{}', // default to {}
+		...openAICompatibleProviderSettings,
+	},
+	openAICompatible1: {
+		...openAICompatibleProviderSettings,
+	},
+	openAICompatible2: {
+		...openAICompatibleProviderSettings,
+	},
+	openAICompatible3: {
+		...openAICompatibleProviderSettings,
 	},
 	gemini: {
 		apiKey: '',
@@ -149,6 +163,9 @@ export const defaultModelsOfProvider = {
 		'ministral-8b-latest',
 	],
 	openAICompatible: [], // fallback
+	openAICompatible1: [],
+	openAICompatible2: [],
+	openAICompatible3: [],
 	googleVertex: [],
 	microsoftAzure: [],
 	awsBedrock: [],
@@ -260,13 +277,6 @@ const openSourceModelOptions_assumingOAICompat = {
 		supportsSystemMessage: false,
 		reasoningCapabilities: { supportsReasoning: true, canTurnOffReasoning: false, canIOReasoning: true, openSourceThinkTags: ['<think>', '</think>'] },
 		contextWindow: 32_000, reservedOutputTokenSpace: 4_096,
-	},
-	'deepseekV4Flash': {
-		supportsFIM: false,
-		supportsSystemMessage: 'system-role',
-		specialToolFormat: 'openai-style',
-		reasoningCapabilities: { supportsReasoning: true, canTurnOffReasoning: true, canIOReasoning: true, openSourceThinkTags: ['<think>', '</think>'] },
-		contextWindow: 1_000_000, reservedOutputTokenSpace: 384_000,
 	},
 	'deepseekCoderV3': {
 		supportsFIM: false,
@@ -391,6 +401,13 @@ const openSourceModelOptions_assumingOAICompat = {
 		supportsSystemMessage: 'system-role',
 		reasoningCapabilities: false,
 		contextWindow: 1_000_000, reservedOutputTokenSpace: 32_000,
+	},
+	'deepseek-default': { // deepseek-default
+		supportsFIM: false,
+		supportsSystemMessage: 'system-role',
+		specialToolFormat: 'openai-style',
+		reasoningCapabilities: { supportsReasoning: true, canTurnOffReasoning: true, canIOReasoning: true, openSourceThinkTags: ['<think>', '</think>'] },
+		contextWindow: 1_000_000, reservedOutputTokenSpace: 384_000,
 	}
 } as const satisfies { [s: string]: Partial<VoidStaticModelInfo> }
 
@@ -431,8 +448,7 @@ const extensiveModelOptionsFallback: VoidStaticProviderInfo['modelOptionsFallbac
 
 	if (lower.includes('deepseek-r1') || lower.includes('deepseek-reasoner')) return toFallback(openSourceModelOptions_assumingOAICompat, 'deepseekR1')
 	if (lower.includes('deepseek') && lower.includes('v2')) return toFallback(openSourceModelOptions_assumingOAICompat, 'deepseekCoderV2')
-	if (lower.includes('deepseek') && /v[4-9]\d*|v[1-9]\d+/.test(lower)) return toFallback(openSourceModelOptions_assumingOAICompat, 'deepseekV4Flash')
-	if (lower.includes('deepseek')) return toFallback(openSourceModelOptions_assumingOAICompat, 'deepseekCoderV3')
+	if (lower.includes('deepseek')) return toFallback(openSourceModelOptions_assumingOAICompat, 'deepseek-default')
 
 	if (lower.includes('llama3')) return toFallback(openSourceModelOptions_assumingOAICompat, 'llama3')
 	if (lower.includes('llama3.1')) return toFallback(openSourceModelOptions_assumingOAICompat, 'llama3.1')
@@ -474,7 +490,7 @@ const extensiveModelOptionsFallback: VoidStaticProviderInfo['modelOptionsFallbac
 
 	if (Object.keys(openSourceModelOptions_assumingOAICompat).map(k => k.toLowerCase()).includes(lower))
 		return toFallback(openSourceModelOptions_assumingOAICompat, lower as keyof typeof openSourceModelOptions_assumingOAICompat)
-
+	//return toFallback(openSourceModelOptions_assumingOAICompat, 'voidefault')
 	return null
 }
 
@@ -1474,6 +1490,9 @@ const modelSettingsOfProvider: { [providerName in ProviderName]: VoidStaticProvi
 	vLLM: vLLMSettings,
 	ollama: ollamaSettings,
 	openAICompatible: openaiCompatible,
+	openAICompatible1: openaiCompatible,
+	openAICompatible2: openaiCompatible,
+	openAICompatible3: openaiCompatible,
 	mistral: mistralSettings,
 
 	liteLLM: liteLLMSettings,
