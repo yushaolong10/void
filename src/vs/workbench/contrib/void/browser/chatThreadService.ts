@@ -50,7 +50,7 @@ import { PermissionDecision } from '../common/agent/permissions/PermissionDecisi
 // related to retrying when LLM message has error
 const CHAT_RETRIES = 3
 const RETRY_DELAY = 2500
-const LLM_STREAM_STATE_THROTTLE_MS = 120
+const LLM_STREAM_STATE_THROTTLE_MS = 250
 
 const parallelReadonlyBuiltinTools = new Set<string>([
 	'read_file',
@@ -454,7 +454,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 	}
 
 	private _readAllThreads(): ChatThreads | null {
-		const threadsStr = this._storageService.get(THREAD_STORAGE_KEY, StorageScope.APPLICATION);
+		const threadsStr = this._storageService.get(THREAD_STORAGE_KEY, StorageScope.WORKSPACE);
 		if (!threadsStr) {
 			return null
 		}
@@ -483,7 +483,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 		this._storageService.store(
 			THREAD_STORAGE_KEY,
 			serializedThreads,
-			StorageScope.APPLICATION,
+			StorageScope.WORKSPACE,
 			StorageTarget.USER
 		);
 	}
@@ -866,6 +866,8 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 	}
 
 	private _canAutoApprovePermissionDecision(decision: PermissionDecision): boolean {
+		if (decision.type === 'allow') return true
+		if (decision.type === 'deny') return false
 		return decision.risk !== 'critical' // 仅 critical 需要手动审批
 	}
 

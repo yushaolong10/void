@@ -20,7 +20,7 @@ import { IHostService } from '../../../services/host/browser/host.js';
 import { ILabelService, Verbosity } from '../../../../platform/label/common/label.js';
 import { ColorScheme } from '../../web.api.js';
 import { OpenFileFolderAction, OpenFolderAction } from '../../actions/workspaceActions.js';
-import { IWindowOpenable } from '../../../../platform/window/common/window.js';
+import type { IWindowOpenable } from '../../../../platform/window/common/window.js';
 import { splitRecentLabel } from '../../../../base/common/labels.js';
 import { IViewsService } from '../../../services/views/common/viewsService.js';
 
@@ -222,62 +222,72 @@ export class EditorGroupWatermark extends Disposable {
 				buttonContainer.appendChild(openSSHButton.root);
 
 
-				// Recents
-				if (recentlyOpened.length !== 0) {
+			// Recents
+				const MAX_RECENT = 5;
 
-					voidIconBox.append(
-						...recentlyOpened.map((w, i) => {
+				const recentEntries = recentlyOpened
+					.map((w) => {
+						if (!isRecentFolder(w)) {
+							return null;
+						}
 
-							let fullPath: string;
-							let windowOpenable: IWindowOpenable;
-							if (isRecentFolder(w)) {
-								windowOpenable = { folderUri: w.folderUri };
-								fullPath = w.label || this.labelService.getWorkspaceLabel(w.folderUri, { verbose: Verbosity.LONG });
-							}
-							else {
-								return null
-								// fullPath = w.label || this.labelService.getWorkspaceLabel(w.workspace, { verbose: Verbosity.LONG });
-								// windowOpenable = { workspaceUri: w.workspace.configPath };
-							}
+						const windowOpenable: IWindowOpenable = { folderUri: w.folderUri };
+						const fullPath = w.label || this.labelService.getWorkspaceLabel(w.folderUri, { verbose: Verbosity.LONG });
 
+						const { name, parentPath } = splitRecentLabel(fullPath);
 
-							const { name, parentPath } = splitRecentLabel(fullPath);
+						const linkSpan = $('span');
+						linkSpan.classList.add('void-link');
+						linkSpan.style.display = 'flex';
+						linkSpan.style.gap = '4px';
+						linkSpan.style.padding = '8px';
 
-							const linkSpan = $('span');
-							linkSpan.classList.add('void-link')
-							linkSpan.style.display = 'flex'
-							linkSpan.style.gap = '4px'
-							linkSpan.style.padding = '8px'
-
-							linkSpan.addEventListener('click', e => {
-								this.hostService.openWindow([windowOpenable], {
-									forceNewWindow: e.ctrlKey || e.metaKey,
-									remoteAuthority: w.remoteAuthority || null // local window if remoteAuthority is not set or can not be deducted from the openable
-								});
-								e.preventDefault();
-								e.stopPropagation();
+						linkSpan.addEventListener('click', e => {
+							this.hostService.openWindow([windowOpenable], {
+								forceNewWindow: e.ctrlKey || e.metaKey,
+								remoteAuthority: w.remoteAuthority || null // local window if remoteAuthority is not set or can not be deducted from the openable
 							});
+							e.preventDefault();
+							e.stopPropagation();
+						});
 
-							const nameSpan = $('span');
-							nameSpan.innerText = name;
-							nameSpan.title = fullPath;
-							linkSpan.appendChild(nameSpan);
+						const nameSpan = $('span');
+						nameSpan.innerText = name;
+						nameSpan.title = fullPath;
+						linkSpan.appendChild(nameSpan);
 
-							const dirSpan = $('span');
-							dirSpan.style.paddingLeft = '4px';
-							dirSpan.style.whiteSpace = 'nowrap';
-							dirSpan.style.overflow = 'hidden';
-							dirSpan.style.maxWidth = '300px';
-							dirSpan.innerText = parentPath;
-							dirSpan.title = fullPath;
+						const dirSpan = $('span');
+						dirSpan.style.paddingLeft = '4px';
+						dirSpan.style.whiteSpace = 'nowrap';
+						dirSpan.style.overflow = 'hidden';
+						dirSpan.style.maxWidth = '300px';
+						dirSpan.innerText = parentPath;
+						dirSpan.title = fullPath;
+						linkSpan.appendChild(dirSpan);
 
-							linkSpan.appendChild(dirSpan);
+						return linkSpan;
+					})
+					.filter((v): v is HTMLElement => !!v)
+					.slice(0, MAX_RECENT);
 
-							return linkSpan
-						})
-							.filter(v => !!v)
-							.slice(0, 5) // take 5 most recent
-					)
+				if (recentEntries.length !== 0) {
+					voidIconBox.append(...recentEntries);
+				}
+
+				if (recentlyOpened.length > recentEntries.length) {
+					const moreSpan = $('span');
+					moreSpan.classList.add('void-link');
+					moreSpan.style.display = 'flex';
+					moreSpan.style.padding = '8px';
+					moreSpan.textContent = 'More...';
+
+					moreSpan.addEventListener('click', e => {
+						this.commandService.executeCommand('workbench.action.openRecent');
+						e.preventDefault();
+						e.stopPropagation();
+					});
+
+					voidIconBox.appendChild(moreSpan);
 				}
 
 			}

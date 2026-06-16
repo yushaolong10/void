@@ -1853,6 +1853,12 @@ const CommandTool = ({ toolMessage, type, threadId }: { threadId: string } & ({
 	const isRejected = toolMessage.type === 'rejected'
 	const { rawParams, params } = toolMessage
 	const componentParams: ToolHeaderParams = { title, desc1, desc1Info, isError, icon, isRejected, }
+	const successMessage = useMemo(() => {
+		if (toolMessage.type !== 'success') return null
+		const { result } = toolMessage
+		if (type === 'run_command') return toolsService.stringOfResult['run_command'](toolMessage.params, result)
+		return toolsService.stringOfResult['run_persistent_command'](toolMessage.params, result)
+	}, [toolMessage, toolsService, type])
 
 
 	const effect = async () => {
@@ -1892,16 +1898,10 @@ const CommandTool = ({ toolMessage, type, threadId }: { threadId: string } & ({
 	}, [terminalToolsService, toolMessage, toolMessage.type, type]);
 
 	if (toolMessage.type === 'success') {
-		const { result } = toolMessage
-
 		// it's unclear that this is a button and not an icon.
 		// componentParams.desc2 = <JumpToTerminalButton
 		// 	onClick={() => { terminalToolsService.openTerminal(terminalId) }}
 		// />
-
-		let msg: string
-		if (type === 'run_command') msg = toolsService.stringOfResult['run_command'](toolMessage.params, result)
-		else msg = toolsService.stringOfResult['run_persistent_command'](toolMessage.params, result)
 
 		if (type === 'run_persistent_command') {
 			componentParams.info = persistentTerminalNameOfId(toolMessage.params.persistentTerminalId)
@@ -1909,7 +1909,7 @@ const CommandTool = ({ toolMessage, type, threadId }: { threadId: string } & ({
 
 		componentParams.children = <ToolChildrenWrapper className='whitespace-pre text-nowrap overflow-auto text-sm'>
 			<div className='!select-text cursor-auto'>
-				<BlockCode initValue={`${msg.trim()}`} language='shellscript' />
+				<BlockCode initValue={`${successMessage?.trim() ?? ''}`} language='shellscript' />
 			</div>
 		</ToolChildrenWrapper>
 	}
@@ -1942,13 +1942,16 @@ const GenericBuiltinTool = <T extends BuiltinToolName>({ toolMessage }: WrapperP
 	const icon = null
 	const isRejected = toolMessage.type === 'rejected'
 	const componentParams: ToolHeaderParams = { title, desc1, desc1Info, isError, icon, isRejected }
+	const successMessage = useMemo(() => {
+		if (toolMessage.type !== 'success') return null
+		const stringify = toolsService.stringOfResult[toolMessage.name as BuiltinToolName] as (params: unknown, result: unknown) => string
+		return stringify(toolMessage.params, toolMessage.result)
+	}, [toolMessage, toolsService])
 
 	if (toolMessage.type === 'success') {
-		const stringify = toolsService.stringOfResult[toolMessage.name as BuiltinToolName] as (params: unknown, result: unknown) => string
-		const msg = stringify(toolMessage.params, toolMessage.result)
 		componentParams.children = <ToolChildrenWrapper className='whitespace-pre text-nowrap overflow-auto text-sm'>
 			<div className='!select-text cursor-auto'>
-				<BlockCode initValue={msg.trim()} language='shellscript' />
+				<BlockCode initValue={successMessage?.trim() ?? ''} language='shellscript' />
 			</div>
 		</ToolChildrenWrapper>
 	}
@@ -1980,14 +1983,20 @@ const MCPToolWrapper = ({ toolMessage }: WrapperProps<string>) => {
 	const icon = null
 
 
-	if (toolMessage.type === 'running_now') return null // do not show running
-
 	const isError = false
 	const isRejected = toolMessage.type === 'rejected'
 	const { rawParams, params } = toolMessage
 	const componentParams: ToolHeaderParams = { title, desc1, isError, icon, isRejected, }
 
-	const paramsStr = JSON.stringify(params, null, 2)
+	const paramsStr = useMemo(() => JSON.stringify(params, null, 2), [params])
+	const resultStr = useMemo(() => {
+		if (toolMessage.type !== 'success' && toolMessage.type !== 'tool_request') return null
+		const { result } = toolMessage
+		return result ? mcpService.stringifyResult(result) : 'null'
+	}, [mcpService, toolMessage])
+
+	if (toolMessage.type === 'running_now') return null // do not show running
+
 	componentParams.desc2 = <CopyButton codeStr={paramsStr} toolTipName={`Copy inputs: ${paramsStr}`} />
 
 	componentParams.info = !toolMessage.mcpServerName ? 'MCP tool not found' : undefined
@@ -1996,12 +2005,10 @@ const MCPToolWrapper = ({ toolMessage }: WrapperProps<string>) => {
 
 
 	if (toolMessage.type === 'success' || toolMessage.type === 'tool_request') {
-		const { result } = toolMessage
-		const resultStr = result ? mcpService.stringifyResult(result) : 'null'
 		componentParams.children = <ToolChildrenWrapper>
 			<SmallProseWrapper>
 				<ChatMarkdownRender
-					string={`\`\`\`json\n${resultStr}\n\`\`\``}
+					string={`\`\`\`json\n${resultStr ?? 'null'}\n\`\`\``}
 					chatMessageLocation={undefined}
 					isApplyEnabled={false}
 					isLinkDetectionEnabled={true}
