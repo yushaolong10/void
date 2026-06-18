@@ -26,7 +26,7 @@ This repo contains the full sourcecode for Void. If you're new, welcome!
 
 We've paused work on the Void IDE (this repo) to explore a few novel coding ideas. We want to focus on innovation over feature-parity. Void will continue running, but without maintenance some existing features might stop working over time. Depending on the direction of our new work, we might not resume Void as an IDE.
 
-We won't be actively reviewing Issues and PRs, but we will respond to all [email](mailto:hello@voideditor.com) inquiries on building and maintaining your own version of Void while we're paused. 
+We won't be actively reviewing Issues and PRs, but we will respond to all [email](mailto:hello@voideditor.com) inquiries on building and maintaining your own version of Void while we're paused.
 
 ## Reference
 
@@ -67,5 +67,37 @@ If you just want to quickly launch and see it, you can also try:
 
 But it's recommended to run `npm run watch` first, as this is the standard development workflow for a VSCode/Void fork — changes are continuously compiled.
 
+### Installing Python Extensions
+
+Extensions to install:
+- Python
+- Python Debugger
+- Black Formatter
+
+> **Note**: Do not install Pylance — it causes recognition conflicts. Installing the Python extension may automatically install Pylance; if that happens, uninstall Pylance separately.
+
+Press `command+shift+P` and open `Open User Settings (JSON)`, then set the following:
+
+```json
+{
+    "editor.fontSize": 13,
+    "python.languageServer": "None",
+    "workbench.editor.empty.hint": "hidden",
+    "explorer.confirmDelete": false,
+    "window.openFoldersInNewWindow": "on",
+    "explorer.confirmDragAndDrop": false,
+    "python.autoComplete.extraPaths": [],
+    "editor.defaultFormatter": "ms-python.black-formatter",
+    "editor.formatOnSave": true,
+    "files.autoSave": "afterDelay",
+    "extensions.ignoreRecommendations": true,
+    "window.autoDetectColorScheme": false
+}
+```
+
+
+
 ## Support
 You can always reach us in our Discord server or contact us via email: hello@voideditor.com.
+
+
