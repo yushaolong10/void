@@ -254,6 +254,14 @@ const terminalLanguages = new Set([
 	'elvish',
 ])
 
+const stripShellPromptPrefixes = (codeStr: string) => {
+	return codeStr.split('\n').map(line =>
+		line
+			.replace(/^(\s*)[$]\s+/, '$1')
+			.replace(/^(\s*)[❯➜]\s+/, '$1')
+	).join('\n')
+}
+
 const ApplyButtonsForTerminal = ({
 	codeStr,
 	applyBoxId,
@@ -277,15 +285,16 @@ const ApplyButtonsForTerminal = ({
 
 	const onClickSubmit = useCallback(async () => {
 		if (isShellRunning) return
+		const commandStr = stripShellPromptPrefixes(codeStr)
 		try {
 			setIsShellRunning(true)
 			const terminalId = await terminalToolService.createPersistentTerminal({ cwd: null })
 			const { interrupt } = await terminalToolService.runCommand(
-				codeStr,
+				commandStr,
 				{ type: 'persistent', persistentTerminalId: terminalId }
 			);
 			interruptToolRef.current = interrupt
-			metricsService.capture('Execute Shell', { length: codeStr.length })
+			metricsService.capture('Execute Shell', { length: commandStr.length })
 		} catch (e) {
 			setIsShellRunning(false)
 			console.error('Failed to execute in terminal:', e)
@@ -523,6 +532,8 @@ export const BlockCodeApplyWrapper = ({
 	const commandService = accessor.get('ICommandService')
 	const { currStreamStateRef } = useApplyStreamState({ applyBoxId })
 	const currStreamState = currStreamStateRef.current
+	const isShellLanguage = terminalLanguages.has(language)
+	const actionableCodeStr = isShellLanguage ? stripShellPromptPrefixes(codeStr) : codeStr
 
 
 	const name = uri !== 'current' ?
@@ -546,8 +557,8 @@ export const BlockCodeApplyWrapper = ({
 			</div>
 			<div className={`${canApply ? '' : 'hidden'} flex items-center gap-1`}>
 				<JumpToFileButton uri={uri} />
-				{currStreamState === 'idle-no-changes' && <CopyButton codeStr={codeStr} toolTipName='Copy' />}
-				<ApplyButtonsHTML uri={uri} applyBoxId={applyBoxId} codeStr={codeStr} language={language} />
+				{currStreamState === 'idle-no-changes' && <CopyButton codeStr={actionableCodeStr} toolTipName='Copy' />}
+				{isShellLanguage && <ApplyButtonsHTML uri={uri} applyBoxId={applyBoxId} codeStr={actionableCodeStr} language={language} />}
 			</div>
 		</div>
 
