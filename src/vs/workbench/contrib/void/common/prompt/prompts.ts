@@ -502,21 +502,27 @@ export const isABuiltinToolName = (toolName: string): toolName is BuiltinToolNam
 	return isAToolName
 }
 
+type AvailableToolsOptions = {
+	supportsVision?: boolean;
+}
 
 
 
 
-export const availableTools = (chatMode: ChatMode | null, mcpTools: InternalToolInfo[] | undefined) => {
+export const availableTools = (chatMode: ChatMode | null, mcpTools: InternalToolInfo[] | undefined, options?: AvailableToolsOptions) => {
 
 	const builtinToolNames: BuiltinToolName[] | undefined = chatMode === 'normal' ? undefined
 		: chatMode === 'gather' ? (Object.keys(builtinTools) as BuiltinToolName[]).filter(toolName => !(toolName in approvalTypeOfBuiltinToolName))
 			: chatMode === 'agent' ? Object.keys(builtinTools) as BuiltinToolName[]
 				: undefined
 
-	const effectiveBuiltinTools = builtinToolNames?.map(toolName => builtinTools[toolName]) ?? undefined
+	const effectiveBuiltinToolNames = options?.supportsVision === false
+		? builtinToolNames?.filter(toolName => toolName !== 'read_image')
+		: builtinToolNames
+	const effectiveBuiltinTools = effectiveBuiltinToolNames?.map(toolName => builtinTools[toolName]) ?? undefined
 	const effectiveMCPTools = chatMode === 'agent' ? mcpTools : undefined
 
-	const tools: InternalToolInfo[] | undefined = !(builtinToolNames || mcpTools) ? undefined
+	const tools: InternalToolInfo[] | undefined = !(effectiveBuiltinToolNames || mcpTools) ? undefined
 		: [
 			...effectiveBuiltinTools ?? [],
 			...effectiveMCPTools ?? [],
@@ -547,9 +553,28 @@ export const reParsedToolXMLString = (toolName: ToolName, toolParams: RawToolPar
 
 /* We expect tools to come at the end - not a hard limit, but that's just how we process them, and the flow makes more sense that way. */
 // - You are allowed to call multiple tools by specifying them consecutively. However, there should be NO text or writing between tool calls or after them.
-const systemToolsXMLPrompt = (chatMode: ChatMode, mcpTools: InternalToolInfo[] | undefined) => {
-	const tools = availableTools(chatMode, mcpTools)
+const systemToolsXMLPrompt = (chatMode: ChatMode, mcpTools: InternalToolInfo[] | undefined, options?: AvailableToolsOptions) => {
+	const tools = availableTools(chatMode, mcpTools, options)
 	if (!tools || tools.length === 0) return null
+	const toolNameSet = new Set(tools.map(tool => tool.name))
+	const batchableReadTools = [
+		'read_file',
+		'read_image',
+		'ls_dir',
+		'get_dir_tree',
+		'search_pathnames_only',
+		'search_for_files',
+		'search_in_file',
+		'read_symbol',
+		'find_references',
+		'go_to_definition',
+		'read_lint_errors',
+		'git_status',
+		'git_diff',
+		'package_script_list',
+		'review_snapshot',
+		'read_test_failures',
+	].filter(toolName => toolNameSet.has(toolName)).join(', ')
 
 	const toolXMLDefinitions = (`\
     Available tools:
@@ -566,7 +591,7 @@ const systemToolsXMLPrompt = (chatMode: ChatMode, mcpTools: InternalToolInfo[] |
     - Do NOT wrap tool calls in generic tags such as <tool_call name="ls_dir">...</tool_call>.
     - Do NOT put tool XML inside markdown code fences.
     - You may call multiple tools in one response when every call is independent and safe to run concurrently.
-    - Prefer batching independent read/search/list/snapshot tools such as read_file, read_image, ls_dir, get_dir_tree, search_pathnames_only, search_for_files, search_in_file, read_symbol, find_references, go_to_definition, read_lint_errors, git_status, git_diff, package_script_list, review_snapshot, and read_test_failures.
+    - Prefer batching independent read/search/list/snapshot tools such as ${batchableReadTools}.
     - You may also batch independent write tools when they affect different files or parent directories.
     - Do not batch tools when a later tool depends on an earlier result.
     - Do not batch delete operations, raw terminal tools such as run_command or run_persistent_command, MCP tools, or multiple writes to the same file. Dedicated read-only tools may be batched even if they are implemented using terminal commands internally.
@@ -649,7 +674,7 @@ ${FINAL}
 // ======================================================== chat (normal, gather, agent) ========================================================
 
 
-export const chat_systemMessage = ({ workspaceFolders, openedURIs, activeURI, persistentTerminalIDs, directoryStr, chatMode: mode, mcpTools, includeXMLToolDefinitions }: { workspaceFolders: string[], directoryStr: string, openedURIs: string[], activeURI: string | undefined, persistentTerminalIDs: string[], chatMode: ChatMode, mcpTools: InternalToolInfo[] | undefined, includeXMLToolDefinitions: boolean }) => {
+export const chat_systemMessage = ({ workspaceFolders, openedURIs, activeURI, persistentTerminalIDs, directoryStr, chatMode: mode, mcpTools, includeXMLToolDefinitions, supportsVision }: { workspaceFolders: string[], directoryStr: string, openedURIs: string[], activeURI: string | undefined, persistentTerminalIDs: string[], chatMode: ChatMode, mcpTools: InternalToolInfo[] | undefined, includeXMLToolDefinitions: boolean, supportsVision?: boolean }) => {
 	const stableHeaderBlock = (`You are a senior software engineering ${mode === 'agent' ? 'agent' : 'assistant'} operating inside the user's codebase.
 	Your mission is ${mode === 'agent'
 		? `to help the user understand, modify, debug, test, review, optimize, run, and maintain their code with high correctness and minimal disruption.`
@@ -685,7 +710,7 @@ ${activeURI}
 	</files_overview>`)
 
 
-	const toolDefinitions = includeXMLToolDefinitions ? systemToolsXMLPrompt(mode, mcpTools) : null
+	const toolDefinitions = includeXMLToolDefinitions ? systemToolsXMLPrompt(mode, mcpTools, { supportsVision }) : null
 
 	const details: string[] = []
 
@@ -703,7 +728,9 @@ ${activeURI}
 		details.push(`Use search_pathnames_only when looking for a specific filename or path.`)
 		details.push(`Use search_for_files for symbols, strings, imports, APIs, config keys, or error text.`)
 		details.push(`Use search_in_file after identifying a likely file and needing exact occurrences.`)
-		details.push(`Use read_image for PNG, JPEG, WebP, or GIF files when visual inspection or image understanding is needed.`)
+		if (supportsVision !== false) {
+			details.push(`Use read_image for PNG, JPEG, WebP, or GIF files when visual inspection or image understanding is needed.`)
+		}
 		details.push(`Use get_dir_tree for focused directories when structure matters; avoid broad tree exploration when targeted search is enough.`)
 		details.push(`Use read_file for relevant source, tests, and configuration. Prefer targeted ranges when exact line numbers are known.`)
 		details.push(`Prefer purpose-built tools over terminal commands: use git_status/git_diff for git inspection, git_apply_patch/git_create_branch/git_commit/git_worktree_create/git_worktree_delete for git actions, package_script_list for package scripts, run_tests for tests/builds/lints/type checks, and install_dependencies for dependency installs.`)

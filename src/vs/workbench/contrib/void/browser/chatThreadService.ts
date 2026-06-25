@@ -1502,18 +1502,22 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 					const fallbackError = { message: 'There was an unexpected error when sending your chat message.', fullError: null }
 					const isNonRetryableVisionError = llmRes.type === 'llmError' && llmRes.error?.message === MODEL_DOES_NOT_SUPPORT_IMAGE_INPUT_ERROR
 					const isProviderImageInputRejectedError = llmRes.type === 'llmError' && isImageInputRejectedByProviderError(llmRes.error?.message)
-					if (isNonRetryableVisionError) {
-						this._disableImageInputsForThread(threadId, IMAGE_INPUT_UNSUPPORTED_BY_MODEL_REASON)
-					}
-					else if (isProviderImageInputRejectedError) {
-						this._disableImageInputsForThread(threadId, IMAGE_INPUT_DISABLED_REASON)
-					}
+					const disabledImageInputs = isNonRetryableVisionError
+						? this._disableImageInputsForThread(threadId, IMAGE_INPUT_UNSUPPORTED_BY_MODEL_REASON)
+						: isProviderImageInputRejectedError
+							? this._disableImageInputsForThread(threadId, IMAGE_INPUT_DISABLED_REASON)
+							: false
 					const error = isProviderImageInputRejectedError
 						? { message: IMAGE_INPUT_REJECTED_BY_PROVIDER_ERROR, fullError: null }
 						: llmRes.type === 'llmError'
 							? llmRes.error ?? fallbackError
 							: fallbackError
 					this._addMessageToThread(threadId, { role: 'assistant', displayContent: error.message, reasoning: '', elapsedMs: elapsedMs(), anthropicReasoning: null })
+					if (disabledImageInputs) {
+						shouldSendAnotherMessage = true
+						this._setStreamState(threadId, { isRunning: 'idle', interrupt: idleInterruptor })
+						break
+					}
 					this._setStreamState(threadId, { isRunning: undefined, error })
 					this._addUserCheckpoint({ threadId })
 					return
@@ -1551,12 +1555,11 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 					}
 					// error, but too many attempts
 					else {
-						if (isNonRetryableVisionError) {
-							this._disableImageInputsForThread(threadId, IMAGE_INPUT_UNSUPPORTED_BY_MODEL_REASON)
-						}
-						else if (isProviderImageInputRejectedError) {
-							this._disableImageInputsForThread(threadId, IMAGE_INPUT_DISABLED_REASON)
-						}
+						const disabledImageInputs = isNonRetryableVisionError
+							? this._disableImageInputsForThread(threadId, IMAGE_INPUT_UNSUPPORTED_BY_MODEL_REASON)
+							: isProviderImageInputRejectedError
+								? this._disableImageInputsForThread(threadId, IMAGE_INPUT_DISABLED_REASON)
+								: false
 						const error = isProviderImageInputRejectedError
 							? { message: IMAGE_INPUT_REJECTED_BY_PROVIDER_ERROR, fullError: null }
 							: llmRes.error
@@ -1566,6 +1569,11 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 						this._addMessageToThread(threadId, { role: 'assistant', displayContent: displayContentSoFar || errorMessage, reasoning: reasoningSoFar, elapsedMs: elapsedMs(), anthropicReasoning: null })
 						if (toolCallSoFar) this._addMessageToThread(threadId, { role: 'interrupted_streaming_tool', name: toolCallSoFar.name, mcpServerName: this._computeMCPServerOfToolName(toolCallSoFar.name) })
 
+						if (disabledImageInputs) {
+							shouldSendAnotherMessage = true
+							this._setStreamState(threadId, { isRunning: 'idle', interrupt: idleInterruptor })
+							break
+						}
 						this._setStreamState(threadId, { isRunning: undefined, error })
 						this._addUserCheckpoint({ threadId })
 						return
@@ -2418,10 +2426,10 @@ We only need to do it for files that were edited since `from`, ie files between 
 		this._setState({ allThreads: newThreads }) // the current thread just changed (it had a message added to it)
 	}
 
-	private _disableImageInputsForThread(threadId: string, disabledReason: string) {
+	private _disableImageInputsForThread(threadId: string, disabledReason: string): boolean {
 		const { allThreads } = this.state
 		const oldThread = allThreads[threadId]
-		if (!oldThread) return
+		if (!oldThread) return false
 
 		let didChange = false
 		const messages = oldThread.messages.map((message): ChatMessage => {
@@ -2458,7 +2466,7 @@ We only need to do it for files that were edited since `from`, ie files between 
 			return message
 		})
 
-		if (!didChange) return
+		if (!didChange) return false
 
 		const newThreads = {
 			...allThreads,
@@ -2470,6 +2478,7 @@ We only need to do it for files that were edited since `from`, ie files between 
 		}
 		this._storeAllThreads(newThreads)
 		this._setState({ allThreads: newThreads })
+		return true
 	}
 
 	// sets the currently selected message (must be undefined if no message is selected)

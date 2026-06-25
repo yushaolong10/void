@@ -894,7 +894,7 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 
 
 	// system message with caching: only recompute when inputs change
-	private _generateChatMessagesSystemMessage = async (chatMode: ChatMode, specialToolFormat: 'openai-style' | 'anthropic-style' | 'gemini-style' | undefined) => {
+	private _generateChatMessagesSystemMessage = async (chatMode: ChatMode, specialToolFormat: 'openai-style' | 'anthropic-style' | 'gemini-style' | undefined, supportsVision?: boolean) => {
 		const workspaceFolders = this.workspaceContextService.getWorkspace().folders.map(f => f.uri.fsPath)
 
 		const openedURIs = [...new Set(
@@ -926,13 +926,14 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 			mcpToolsSummary: mcpTools?.map(t => ({ name: t.name, server: t.mcpServerName, paramsKeys: Object.keys(t.params).sort() })),
 			chatMode,
 			includeXMLToolDefinitions,
+			supportsVision,
 		})
 
 		if (this._systemMessageCache?.key === cacheKey) {
 			return this._systemMessageCache.value
 		}
 
-		const systemMessage = chat_systemMessage({ workspaceFolders, openedURIs, directoryStr, activeURI, persistentTerminalIDs, chatMode, mcpTools, includeXMLToolDefinitions })
+		const systemMessage = chat_systemMessage({ workspaceFolders, openedURIs, directoryStr, activeURI, persistentTerminalIDs, chatMode, mcpTools, includeXMLToolDefinitions, supportsVision })
 		this._systemMessageCache = { key: cacheKey, value: systemMessage }
 		return systemMessage
 	}
@@ -1231,10 +1232,10 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 
 		const { overridesOfModel } = this.voidSettingsService.state
 		const { providerName, modelName } = modelSelection
-		const { specialToolFormat } = getModelCapabilities(providerName, modelName, overridesOfModel)
+		const { specialToolFormat, supportsVision } = getModelCapabilities(providerName, modelName, overridesOfModel)
 		const { disableSystemMessage } = this.voidSettingsService.state.globalSettings
 
-		const fullSystemMessage = await this._generateChatMessagesSystemMessage(chatMode, specialToolFormat)
+		const fullSystemMessage = await this._generateChatMessagesSystemMessage(chatMode, specialToolFormat, supportsVision)
 		const systemMessage = disableSystemMessage ? '' : fullSystemMessage
 		const aiInstructions = await this._getCombinedAIInstructionsAsync()
 

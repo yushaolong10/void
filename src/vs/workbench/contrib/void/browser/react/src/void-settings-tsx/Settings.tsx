@@ -231,7 +231,7 @@ const SimpleModelSettingsDialog = ({
 	const partialDefaults: Partial<ModelOverrides> = {};
 	for (const k of modelOverrideKeys) {
 		const value = defaultModelCapabilities[k];
-		if (value) {
+		if (value !== undefined && value !== null) {
 			partialDefaults[k] = value as any;
 		}
 	}
