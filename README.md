@@ -36,12 +36,14 @@ For a guide on how to develop your own version of Void, see [HOW_TO_CONTRIBUTE](
 
 For a local macOS ARM packaging guide, see [MacPack](./MacPack.md).
 
-### Fixes
+### Opts
 
 - Agent checkpoint resume: recover malformed XML tool calls such as incomplete `read_file` outputs.
 - Agent checkpoint resume: continue tool execution when XML tool calls are emitted inside reasoning content.
 - `edit_file` matching: tolerate whitespace and comment differences when locating `ORIGINAL` blocks.
 - macOS ARM packaging: see [MacPack](./MacPack.md).
+- agent capability enhance like claude-code: see [ENHENCE-LIKE-CLAUDE](./enhance-like-claude.md).
+- try to build your own custom agent: see [BUILD-CUSTOM-AGENT](./build-custom-agent.md).
 
 
 
