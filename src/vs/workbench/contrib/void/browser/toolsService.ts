@@ -24,12 +24,41 @@ import { ToolRisk } from '../common/agent/tools/ToolDefinition.js'
 import { ReviewSnapshotManager } from '../common/agent/execution/ReviewSnapshotManager.js'
 import { WorktreeManager } from '../common/agent/execution/WorktreeManager.js'
 import { safeStringify } from '../common/agent/tools/safeSerialize.js'
+import type { ImageAttachment } from '../common/chatThreadServiceTypes.js'
 
 
 // tool use for AI
 type ValidateBuiltinParams = { [T in BuiltinToolName]: (p: RawToolParamsObj) => BuiltinToolCallParams[T] }
 type CallBuiltinTool = { [T in BuiltinToolName]: (p: BuiltinToolCallParams[T]) => Promise<{ result: BuiltinToolResultType[T] | Promise<BuiltinToolResultType[T]>, interruptTool?: () => void }> }
 type BuiltinToolResultToString = { [T in BuiltinToolName]: (p: BuiltinToolCallParams[T], result: Awaited<BuiltinToolResultType[T]>) => string }
+
+const SUPPORTED_IMAGE_MIME_TYPES = new Set<ImageAttachment['mimeType']>(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
+const MAX_TOOL_IMAGE_BYTES = 5 * 1024 * 1024
+
+const imageMimeTypeOfPath = (path: string): ImageAttachment['mimeType'] | null => {
+	const lower = path.toLowerCase()
+	if (lower.endsWith('.png')) return 'image/png'
+	if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg'
+	if (lower.endsWith('.webp')) return 'image/webp'
+	if (lower.endsWith('.gif')) return 'image/gif'
+	return null
+}
+
+const bytesToBase64 = (bytes: Uint8Array) => {
+	let binary = ''
+	const chunkSize = 0x8000
+	for (let i = 0; i < bytes.length; i += chunkSize) {
+		const chunk = bytes.subarray(i, i + chunkSize)
+		binary += String.fromCharCode(...chunk)
+	}
+	return btoa(binary)
+}
+
+const basenameOfPath = (path: string) => {
+	const normalized = path.replace(/\\/g, '/')
+	const slashIdx = normalized.lastIndexOf('/')
+	return slashIdx === -1 ? normalized : normalized.slice(slashIdx + 1)
+}
 
 
 const isFalsy = (u: unknown) => {
@@ -240,6 +269,11 @@ export class ToolsService implements IToolsService {
 				if (endLine !== null && endLine < 1) endLine = null
 
 				return { uri, startLine, endLine, pageNumber }
+			},
+			read_image: (params: RawToolParamsObj) => {
+				const { uri: uriStr } = params
+				const uri = validateURI(uriStr)
+				return { uri }
 			},
 			ls_dir: (params: RawToolParamsObj) => {
 				const { uri: uriStr, page_number: pageNumberUnknown } = params
@@ -508,6 +542,29 @@ export class ToolsService implements IToolsService {
 				const hasNextPage = (contents.length - 1) - toIdx >= 1
 				const totalFileLen = contents.length
 				return { result: { fileContents, totalFileLen, hasNextPage, totalNumLines } }
+			},
+			read_image: async ({ uri }) => {
+				const mimeType = imageMimeTypeOfPath(uri.fsPath)
+				if (!mimeType || !SUPPORTED_IMAGE_MIME_TYPES.has(mimeType)) {
+					throw new Error(`Unsupported image type. Supported types: PNG, JPEG, WebP, GIF.`)
+				}
+
+				const contents = await fileService.readFile(uri)
+				if (contents.value.byteLength > MAX_TOOL_IMAGE_BYTES) {
+					throw new Error(`Image is larger than 5MB. Please use a smaller image.`)
+				}
+
+				const dataUrl = `data:${mimeType};base64,${bytesToBase64(contents.value.buffer)}`
+				const attachment: ImageAttachment = {
+					type: 'image',
+					id: generateUuid(),
+					name: basenameOfPath(uri.fsPath),
+					mimeType,
+					sizeBytes: contents.value.byteLength,
+					dataUrl,
+				}
+
+				return { result: { attachment } }
 			},
 
 			ls_dir: async ({ uri, pageNumber }) => {
@@ -820,6 +877,7 @@ export class ToolsService implements IToolsService {
 		const originalCallTool = { ...this.callTool } as CallBuiltinTool
 		const riskOfTool: { [T in BuiltinToolName]: ToolRisk } = {
 			read_file: 'read',
+			read_image: 'read',
 			ls_dir: 'read',
 			get_dir_tree: 'read',
 			search_pathnames_only: 'read',
@@ -948,6 +1006,9 @@ export class ToolsService implements IToolsService {
 		this.stringOfResult = {
 			read_file: (params, result) => {
 				return `${params.uri.fsPath}\n\`\`\`\n${result.fileContents}\n\`\`\`${nextPageStr(result.hasNextPage)}${result.hasNextPage ? `\nMore info because truncated: this file has ${result.totalNumLines} lines, or ${result.totalFileLen} characters.` : ''}`
+			},
+			read_image: (params, result) => {
+				return `${params.uri.fsPath}\n[Image: ${result.attachment.name}, ${result.attachment.mimeType}, ${result.attachment.sizeBytes} bytes]`
 			},
 			ls_dir: (params, result) => {
 				const dirTreeStr = stringifyDirectoryTree1Deep(params, result)

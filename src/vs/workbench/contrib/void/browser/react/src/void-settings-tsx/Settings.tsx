@@ -229,7 +229,12 @@ const SimpleModelSettingsDialog = ({
 
 	// Create the placeholder with the default values for allowed keys
 	const partialDefaults: Partial<ModelOverrides> = {};
-	for (const k of modelOverrideKeys) { if (defaultModelCapabilities[k]) partialDefaults[k] = defaultModelCapabilities[k] as any; }
+	for (const k of modelOverrideKeys) {
+		const value = defaultModelCapabilities[k];
+		if (value) {
+			partialDefaults[k] = value as any;
+		}
+	}
 	const placeholder = JSON.stringify(partialDefaults, null, 2);
 
 	const [overrideEnabled, setOverrideEnabled] = useState<boolean>(() => !!currentOverrides);
@@ -279,7 +284,7 @@ const SimpleModelSettingsDialog = ({
 				cleaned[k] = parsedInput[k] as any;
 			}
 		}
-		await settingsStateService.setOverridesOfModel(providerName, modelName, cleaned);
+		await settingsStateService.setOverridesOfModel(providerName, modelName, Object.keys(cleaned).length ? cleaned : undefined);
 		onClose();
 	};
 
@@ -339,14 +344,15 @@ const SimpleModelSettingsDialog = ({
 					<ChatMarkdownRender string={`See the [sourcecode](${sourcecodeOverridesLink}) for a reference on how to set this JSON (advanced).`} chatMessageLocation={undefined} />
 				</div>}
 
-				<textarea
-					key={overrideEnabled + ''}
+				{overrideEnabled ? <textarea
+					key={`${providerName}:${modelName}:enabled`}
 					ref={textAreaRef}
-					className={`w-full min-h-[200px] p-2 rounded-sm border border-void-border-2 bg-void-bg-2 resize-none font-mono text-sm ${!overrideEnabled ? 'text-void-fg-3' : ''}`}
-					defaultValue={overrideEnabled && currentOverrides ? JSON.stringify(currentOverrides, null, 2) : placeholder}
+					className='w-full min-h-[200px] p-2 rounded-sm border border-void-border-2 bg-void-bg-2 resize-none font-mono text-sm'
+					defaultValue={currentOverrides ? JSON.stringify(currentOverrides, null, 2) : placeholder}
 					placeholder={placeholder}
-					readOnly={!overrideEnabled}
-				/>
+				/> : <div className='w-full min-h-[88px] p-3 rounded-sm border border-void-border-2 bg-void-bg-2 text-sm text-void-fg-3'>
+					Overrides are off. Turn this on to edit model capability JSON. Saving while off clears any overrides for this model.
+				</div>}
 				{errorMsg && (
 					<div className="text-red-500 mt-2 text-sm">{errorMsg}</div>
 				)}
@@ -360,7 +366,7 @@ const SimpleModelSettingsDialog = ({
 						onClick={onSave}
 						className="px-3 py-1 bg-[#0e70c0] text-white"
 					>
-						Save
+						{overrideEnabled ? 'Save' : 'Clear overrides'}
 					</VoidButtonBgDarken>
 				</div>
 			</div>

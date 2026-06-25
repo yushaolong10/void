@@ -1,4 +1,5 @@
 import { URI } from '../../../../base/common/uri.js'
+import type { ImageAttachment } from './chatThreadServiceTypes.js';
 import { RawMCPToolCall } from './mcpServiceTypes.js';
 import { builtinTools } from './prompt/prompts.js';
 import { RawToolParamsObj } from './sendLLMMessageTypes.js';
@@ -55,6 +56,7 @@ export const toolApprovalTypes = new Set<ToolApprovalType>([
 // PARAMS OF TOOL CALL
 export type BuiltinToolCallParams = {
 	'read_file': { uri: URI, startLine: number | null, endLine: number | null, pageNumber: number },
+	'read_image': { uri: URI },
 	'ls_dir': { uri: URI, pageNumber: number },
 	'get_dir_tree': { uri: URI },
 	'search_pathnames_only': { query: string, includePattern: string | null, pageNumber: number },
@@ -91,6 +93,7 @@ export type BuiltinToolCallParams = {
 // RESULT OF TOOL CALL
 export type BuiltinToolResultType = {
 	'read_file': { fileContents: string, totalFileLen: number, totalNumLines: number, hasNextPage: boolean },
+	'read_image': { attachment: ImageAttachment },
 	'ls_dir': { children: ShallowDirectoryItem[] | null, hasNextPage: boolean, hasPrevPage: boolean, itemsRemaining: number },
 	'get_dir_tree': { str: string, },
 	'search_pathnames_only': { uris: URI[], hasNextPage: boolean },

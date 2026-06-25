@@ -29,20 +29,32 @@ export const getErrorMessage: (error: unknown) => string = (error) => {
 
 
 
+export type SupportedImageMimeType = 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif'
+
+export type AnthropicUserContentPart =
+	| { type: 'text'; text: string; }
+	| { type: 'tool_result'; tool_use_id: string; content: string; }
+	| { type: 'image'; source: { type: 'base64'; media_type: SupportedImageMimeType; data: string; } }
+
+export type OpenAIUserContentPart =
+	| { type: 'text'; text: string }
+	| { type: 'image_url'; image_url: { url: string } }
+
 export type AnthropicLLMChatMessage = {
 	role: 'assistant',
 	content: string | (AnthropicReasoning | { type: 'text'; text: string }
-		| { type: 'tool_use'; name: string; input: Record<string, any>; id: string; }
+			| { type: 'tool_use'; name: string; input: Record<string, any>; id: string; }
 	)[];
 } | {
 	role: 'user',
-	content: string | (
-		{ type: 'text'; text: string; } | { type: 'tool_result'; tool_use_id: string; content: string; }
-	)[]
+	content: string | AnthropicUserContentPart[]
 }
 export type OpenAILLMChatMessage = {
-	role: 'system' | 'user' | 'developer';
+	role: 'system' | 'developer';
 	content: string;
+} | {
+	role: 'user';
+	content: string | OpenAIUserContentPart[];
 } | {
 	role: 'assistant',
 	content: string | (AnthropicReasoning | { type: 'text'; text: string })[];
@@ -211,5 +223,4 @@ export type MainModelListParams<modelResponse> = Omit<ModelListParams<modelRespo
 
 export type EventModelListOnSuccessParams<modelResponse> = Parameters<ModelListParams<modelResponse>['onSuccess']>[0] & { requestId: string }
 export type EventModelListOnErrorParams<modelResponse> = Parameters<ModelListParams<modelResponse>['onError']>[0] & { requestId: string }
-
 

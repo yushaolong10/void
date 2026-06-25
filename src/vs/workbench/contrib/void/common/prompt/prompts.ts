@@ -201,6 +201,14 @@ export const builtinTools: {
 		},
 	},
 
+	read_image: {
+		name: 'read_image',
+		description: `Reads an image file and provides it to the vision-capable model for analysis. Use this for PNG, JPEG, WebP, or GIF files when visual inspection is needed.`,
+		params: {
+			...uriParam('image file'),
+		},
+	},
+
 	ls_dir: {
 		name: 'ls_dir',
 		description: `Lists all files and folders in the given URI.`,
@@ -558,7 +566,7 @@ const systemToolsXMLPrompt = (chatMode: ChatMode, mcpTools: InternalToolInfo[] |
     - Do NOT wrap tool calls in generic tags such as <tool_call name="ls_dir">...</tool_call>.
     - Do NOT put tool XML inside markdown code fences.
     - You may call multiple tools in one response when every call is independent and safe to run concurrently.
-    - Prefer batching independent read/search/list/snapshot tools such as read_file, ls_dir, get_dir_tree, search_pathnames_only, search_for_files, search_in_file, read_symbol, find_references, go_to_definition, read_lint_errors, git_status, git_diff, package_script_list, review_snapshot, and read_test_failures.
+    - Prefer batching independent read/search/list/snapshot tools such as read_file, read_image, ls_dir, get_dir_tree, search_pathnames_only, search_for_files, search_in_file, read_symbol, find_references, go_to_definition, read_lint_errors, git_status, git_diff, package_script_list, review_snapshot, and read_test_failures.
     - You may also batch independent write tools when they affect different files or parent directories.
     - Do not batch tools when a later tool depends on an earlier result.
     - Do not batch delete operations, raw terminal tools such as run_command or run_persistent_command, MCP tools, or multiple writes to the same file. Dedicated read-only tools may be batched even if they are implemented using terminal commands internally.
@@ -695,6 +703,7 @@ ${activeURI}
 		details.push(`Use search_pathnames_only when looking for a specific filename or path.`)
 		details.push(`Use search_for_files for symbols, strings, imports, APIs, config keys, or error text.`)
 		details.push(`Use search_in_file after identifying a likely file and needing exact occurrences.`)
+		details.push(`Use read_image for PNG, JPEG, WebP, or GIF files when visual inspection or image understanding is needed.`)
 		details.push(`Use get_dir_tree for focused directories when structure matters; avoid broad tree exploration when targeted search is enough.`)
 		details.push(`Use read_file for relevant source, tests, and configuration. Prefer targeted ranges when exact line numbers are known.`)
 		details.push(`Prefer purpose-built tools over terminal commands: use git_status/git_diff for git inspection, git_apply_patch/git_create_branch/git_commit/git_worktree_create/git_worktree_delete for git actions, package_script_list for package scripts, run_tests for tests/builds/lints/type checks, and install_dependencies for dependency installs.`)

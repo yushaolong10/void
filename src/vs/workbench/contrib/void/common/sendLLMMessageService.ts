@@ -15,6 +15,20 @@ import { Disposable } from '../../../../base/common/lifecycle.js';
 import { ILogService } from '../../../../platform/log/common/log.js';
 import { IVoidSettingsService } from './voidSettingsService.js';
 import { IMCPService } from './mcpService.js';
+import { getModelCapabilities } from './modelCapabilities.js';
+
+export const MODEL_DOES_NOT_SUPPORT_IMAGE_INPUT_ERROR = 'The selected model does not support image input. Switch to a vision-capable model or avoid reading/sending images.'
+
+const containsImageInput = (value: unknown): boolean => {
+	if (!value || typeof value !== 'object') return false
+	if (Array.isArray(value)) return value.some(containsImageInput)
+
+	const record = value as Record<string, unknown>
+	if (record.type === 'image' || record.type === 'image_url') return true
+	if ('image_url' in record) return true
+
+	return Object.values(record).some(containsImageInput)
+}
 
 // calls channel to implement features
 export const ILLMMessageService = createDecorator<ILLMMessageService>('llmMessageService');
@@ -116,6 +130,14 @@ export class LLMMessageService extends Disposable implements ILLMMessageService 
 			const message = `No messages detected.`
 			onError({ message, fullError: null })
 			return null
+		}
+
+		if (params.messagesType === 'chatMessages' && containsImageInput(params.messages)) {
+			const capabilities = getModelCapabilities(modelSelection.providerName, modelSelection.modelName, params.overridesOfModel)
+			if (capabilities.supportsVision === false) {
+				onError({ message: MODEL_DOES_NOT_SUPPORT_IMAGE_INPUT_ERROR, fullError: null })
+				return null
+			}
 		}
 
 		const { settingsOfProvider, } = this.voidSettingsService.state

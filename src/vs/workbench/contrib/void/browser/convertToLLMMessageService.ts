@@ -6,10 +6,10 @@ import { IWorkspaceContextService } from '../../../../platform/workspace/common/
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
 import { Schemas } from '../../../../base/common/network.js';
-import { ChatMessage } from '../common/chatThreadServiceTypes.js';
+import { ChatMessage, ImageAttachment } from '../common/chatThreadServiceTypes.js';
 import { getIsReasoningEnabledState, getReservedOutputTokenSpace, getModelCapabilities } from '../common/modelCapabilities.js';
 import { reParsedToolXMLString, chat_systemMessage, CHAT_HISTORY_COMPRESSION, compressHistoryPrompt } from '../common/prompt/prompts.js';
-import { AnthropicLLMChatMessage, AnthropicReasoning, GeminiLLMChatMessage, LLMChatMessage, LLMFIMMessage, OpenAILLMChatMessage, RawToolParamsObj, ServiceSendLLMMessageParams } from '../common/sendLLMMessageTypes.js';
+import { AnthropicLLMChatMessage, AnthropicReasoning, AnthropicUserContentPart, GeminiLLMChatMessage, LLMChatMessage, LLMFIMMessage, OpenAILLMChatMessage, OpenAIUserContentPart, RawToolParamsObj, ServiceSendLLMMessageParams } from '../common/sendLLMMessageTypes.js';
 import { IVoidSettingsService } from '../common/voidSettingsService.js';
 import { ChatMode, FeatureName, ModelSelection, ProviderName } from '../common/voidSettingsTypes.js';
 import { ILLMMessageService } from '../common/sendLLMMessageService.js';
@@ -32,15 +32,21 @@ const OPEN_FILE_SCHEMES = new Set([
 
 
 
+type SimpleUserPart =
+	| { type: 'text'; text: string }
+	| { type: 'image'; mimeType: ImageAttachment['mimeType']; dataUrl: string; name: string }
+
 type SimpleLLMMessage = {
 	role: 'tool';
 	content: string;
 	id: string;
 	name: ToolName;
 	rawParams: RawToolParamsObj;
+	imageAttachment?: ImageAttachment;
 } | {
 	role: 'user';
 	content: string;
+	parts?: SimpleUserPart[];
 } | {
 	role: 'assistant';
 	content: string;
@@ -55,6 +61,62 @@ const TRIM_TO_LEN = 120
 const DIRECTORY_STR_CACHE_TTL_MS = 30_000
 const VOID_RULES_CACHE_TTL_MS = 30_000
 const AGENT_MANIFEST_FILENAMES = ['AGENTS.md', 'VOID.md', 'CLAUDE.md', '.voidrules'] as const
+const MAX_IMAGE_PAYLOAD_MESSAGES_IN_HISTORY = 2
+const OLDER_IMAGE_OMITTED_REASON = 'older image omitted from LLM context to reduce cost'
+
+const dataUrlToBase64 = (dataUrl: string) => {
+	const commaIdx = dataUrl.indexOf(',')
+	return commaIdx === -1 ? dataUrl : dataUrl.slice(commaIdx + 1)
+}
+
+const simpleUserPartsToOpenAIContent = (msg: SimpleLLMMessage & { role: 'user' }): string | OpenAIUserContentPart[] => {
+	if (!msg.parts?.length) return msg.content
+	return msg.parts.map((part): OpenAIUserContentPart => {
+		if (part.type === 'text') return { type: 'text', text: part.text }
+		return { type: 'image_url', image_url: { url: part.dataUrl } }
+	})
+}
+
+const simpleUserPartsToAnthropicContent = (msg: SimpleLLMMessage & { role: 'user' }): string | AnthropicUserContentPart[] => {
+	if (!msg.parts?.length) return msg.content
+	return msg.parts.map((part): AnthropicUserContentPart => {
+		if (part.type === 'text') return { type: 'text', text: part.text }
+		return {
+			type: 'image',
+			source: {
+				type: 'base64',
+				media_type: part.mimeType,
+				data: dataUrlToBase64(part.dataUrl),
+			}
+		}
+	})
+}
+
+const imageAttachmentToOpenAIContent = (attachment: ImageAttachment, text: string): OpenAIUserContentPart[] => [
+	{ type: 'text', text },
+	{ type: 'image_url', image_url: { url: attachment.dataUrl } }
+]
+
+const imageAttachmentToAnthropicContent = (attachment: ImageAttachment, text: string): AnthropicUserContentPart[] => [
+	{ type: 'text', text },
+	{
+		type: 'image',
+		source: {
+			type: 'base64',
+			media_type: attachment.mimeType,
+			data: dataUrlToBase64(attachment.dataUrl),
+		}
+	}
+]
+
+const disabledImageAttachmentText = (attachment: ImageAttachment) =>
+	`[Image not sent to model: ${attachment.name}${attachment.disabledReason ? ` (${attachment.disabledReason})` : ''}]`
+
+const syncTrimmedUserContentToParts = (msg: SimpleLLMMessage | { role: 'system', content: string }) => {
+	if (msg.role !== 'user' || !msg.parts?.length) return
+	const firstTextPart = msg.parts.find(part => part.type === 'text')
+	if (firstTextPart?.type === 'text') firstTextPart.text = msg.content
+}
 
 
 
@@ -112,6 +174,13 @@ const prepareMessages_openai_tools = (messages: SimpleLLMMessage[]): AnthropicOr
 				newMessages.push(assistantMsg)
 				continue
 			}
+			if (currMsg.role === 'user') {
+				newMessages.push({
+					role: 'user',
+					content: simpleUserPartsToOpenAIContent(currMsg),
+				})
+				continue
+			}
 			newMessages.push(currMsg)
 			continue
 		}
@@ -138,6 +207,24 @@ const prepareMessages_openai_tools = (messages: SimpleLLMMessage[]): AnthropicOr
 			tool_call_id: currMsg.id,
 			content: currMsg.content,
 		})
+		const nextMsg = messages[i + 1]
+		if (nextMsg?.role !== 'tool') {
+			let firstToolIdx = i
+			while (firstToolIdx > 0 && messages[firstToolIdx - 1].role === 'tool') firstToolIdx -= 1
+			for (let j = firstToolIdx; j <= i; j += 1) {
+				const toolMsg = messages[j]
+				if (toolMsg.role !== 'tool' || !toolMsg.imageAttachment) continue
+				const text = toolMsg.imageAttachment.isLLMDisabled
+					? disabledImageAttachmentText(toolMsg.imageAttachment)
+					: `Image read from tool result: ${toolMsg.imageAttachment.name}`
+				newMessages.push({
+					role: 'user',
+					content: toolMsg.imageAttachment.isLLMDisabled
+						? text
+						: imageAttachmentToOpenAIContent(toolMsg.imageAttachment, text),
+				})
+			}
+		}
 	}
 	return newMessages
 
@@ -214,7 +301,7 @@ const prepareMessages_anthropic_tools = (messages: SimpleLLMMessage[], supportsA
 		if (currMsg.role === 'user') {
 			newMessages[i] = {
 				role: 'user',
-				content: currMsg.content,
+				content: simpleUserPartsToAnthropicContent(currMsg),
 			}
 			continue
 		}
@@ -232,9 +319,17 @@ const prepareMessages_anthropic_tools = (messages: SimpleLLMMessage[], supportsA
 			}
 
 			// turn each tool into a user message with tool results at the end
+			const imageContent = currMsg.imageAttachment
+				? currMsg.imageAttachment.isLLMDisabled
+					? [{ type: 'text' as const, text: disabledImageAttachmentText(currMsg.imageAttachment) }]
+					: imageAttachmentToAnthropicContent(currMsg.imageAttachment, `Image read from tool result: ${currMsg.imageAttachment.name}`)
+				: []
 			newMessages[i] = {
 				role: 'user',
-				content: [{ type: 'tool_result', tool_use_id: currMsg.id, content: currMsg.content }]
+				content: [
+					{ type: 'tool_result', tool_use_id: currMsg.id, content: currMsg.content },
+					...imageContent
+				]
 			}
 			continue
 		}
@@ -287,6 +382,11 @@ const prepareMessages_XML_tools = (messages: SimpleLLMMessage[], supportsAnthrop
 		}
 		// add user or tool to the previous user message
 		else if (c.role === 'user' || c.role === 'tool') {
+			if (c.role === 'user' && c.parts?.length) {
+				const textContent = c.content
+				const imageLabels = c.parts.filter(part => part.type === 'image').map(part => `[Image: ${part.name}]`)
+				c.content = [textContent, ...imageLabels].filter(Boolean).join('\n\n')
+			}
 			if (c.role === 'tool')
 				c.content = `<${c.name}_result>\n${c.content}\n</${c.name}_result>`
 
@@ -344,7 +444,11 @@ const prepareOpenAIOrAnthropicMessages = ({
 	messages.unshift({ role: 'system', content: combinedSystemMessage })
 
 	// ================ trim ================
-	messages = messages.map(m => ({ ...m, content: m.role !== 'tool' ? m.content.trim() : m.content }))
+	messages = messages.map(m => {
+		const next = { ...m, content: m.role !== 'tool' ? m.content.trim() : m.content }
+		syncTrimmedUserContentToParts(next)
+		return next
+	})
 
 	type MesType = (typeof messages)[0]
 
@@ -402,12 +506,14 @@ const prepareOpenAIOrAnthropicMessages = ({
 			// If trimming this message to TRIM_TO_LEN is more than enough, do a partial trim and finish
 			if (numCharsWillTrim > remainingCharsToTrim) {
 				m.content = m.content.slice(0, m.content.length - remainingCharsToTrim - '...'.length).trim() + '...'
+				syncTrimmedUserContentToParts(m)
 				break
 			}
 
 			// Trim the entire message to TRIM_TO_LEN
 			remainingCharsToTrim -= numCharsWillTrim
 			m.content = m.content.substring(0, trimmedLen) + '...'
+			syncTrimmedUserContentToParts(m)
 		}
 	}
 
@@ -447,10 +553,16 @@ const prepareOpenAIOrAnthropicMessages = ({
 	}
 	// if does not support system message
 	else {
-		const newFirstMessage = {
-			role: 'user',
-			content: `<SYSTEM_MESSAGE>\n${newSysMsg}\n</SYSTEM_MESSAGE>\n${llmMessages[0].content}`
-		} as const
+		const firstContent = llmMessages[0].content
+		const newFirstMessage = (Array.isArray(firstContent)
+			? {
+				role: 'user',
+				content: [{ type: 'text', text: `<SYSTEM_MESSAGE>\n${newSysMsg}\n</SYSTEM_MESSAGE>` }, ...firstContent] as AnthropicUserContentPart[] | OpenAIUserContentPart[]
+			}
+			: {
+				role: 'user',
+				content: `<SYSTEM_MESSAGE>\n${newSysMsg}\n</SYSTEM_MESSAGE>\n${firstContent}`
+			}) as AnthropicOrOpenAILLMMessage
 		llmMessages.splice(0, 1) // delete first message
 		llmMessages.unshift(newFirstMessage) // add new first message
 	}
@@ -999,8 +1111,20 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 	private _chatMessagesToSimpleMessages(chatMessages: ChatMessage[]): SimpleLLMMessage[] {
 
 		const simpleLLMMessages: SimpleLLMMessage[] = []
+		const imagePayloadMessageIdxs = new Set<number>()
+		for (let i = chatMessages.length - 1; i >= 0 && imagePayloadMessageIdxs.size < MAX_IMAGE_PAYLOAD_MESSAGES_IN_HISTORY; i -= 1) {
+			const message = chatMessages[i]
+			const hasEnabledUserImage = message.role === 'user' && !!message.attachments?.some(attachment => !attachment.isLLMDisabled)
+			const hasEnabledToolImage = message.role === 'tool'
+				&& message.type === 'success'
+				&& message.name === 'read_image'
+				&& !!(message.result as { attachment?: ImageAttachment }).attachment
+				&& !(message.result as { attachment?: ImageAttachment }).attachment?.isLLMDisabled
+			if (hasEnabledUserImage || hasEnabledToolImage) imagePayloadMessageIdxs.add(i)
+		}
 
-		for (const m of chatMessages) {
+		for (let i = 0; i < chatMessages.length; i += 1) {
+			const m = chatMessages[i]
 			if (m.role === 'checkpoint') continue
 			if (m.role === 'interrupted_streaming_tool') continue
 			if (m.role === 'aborted_assistant') {
@@ -1021,21 +1145,50 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 						anthropicReasoning: m.anthropicReasoning,
 					})
 				}
-			else if (m.role === 'tool') {
-				simpleLLMMessages.push({
-					role: m.role,
-					content: m.content,
-					name: m.name,
-					id: m.id,
-					rawParams: m.rawParams,
-				})
-			}
-			else if (m.role === 'user') {
-				simpleLLMMessages.push({
-					role: m.role,
-					content: m.content,
-				})
-			}
+				else if (m.role === 'tool') {
+					const imageAttachment = m.type === 'success' && m.name === 'read_image'
+						? (m.result as { attachment?: ImageAttachment }).attachment
+						: undefined
+					const imageAttachmentForLLM = imageAttachment && !imagePayloadMessageIdxs.has(i) && !imageAttachment.isLLMDisabled
+						? { ...imageAttachment, isLLMDisabled: true, disabledReason: OLDER_IMAGE_OMITTED_REASON }
+						: imageAttachment
+					simpleLLMMessages.push({
+						role: m.role,
+						content: m.content,
+						name: m.name,
+						id: m.id,
+						rawParams: m.rawParams,
+						imageAttachment: imageAttachmentForLLM,
+					})
+				}
+				else if (m.role === 'user') {
+					const attachments = m.attachments ?? []
+					const attachmentsForLLM = imagePayloadMessageIdxs.has(i)
+						? attachments
+						: attachments.map(attachment => attachment.isLLMDisabled ? attachment : {
+							...attachment,
+							isLLMDisabled: true,
+							disabledReason: OLDER_IMAGE_OMITTED_REASON,
+						})
+					const enabledAttachments = attachmentsForLLM.filter(attachment => !attachment.isLLMDisabled)
+					const content = [
+						m.content,
+						...attachmentsForLLM.filter(attachment => attachment.isLLMDisabled).map(disabledImageAttachmentText)
+					].filter(Boolean).join('\n\n')
+					simpleLLMMessages.push({
+						role: m.role,
+						content,
+						parts: enabledAttachments.length ? [
+							{ type: 'text', text: content },
+							...enabledAttachments.map((attachment): SimpleUserPart => ({
+								type: 'image',
+								mimeType: attachment.mimeType,
+								dataUrl: attachment.dataUrl,
+								name: attachment.name,
+							}))
+						] : undefined,
+					})
+				}
 		}
 		return simpleLLMMessages
 	}

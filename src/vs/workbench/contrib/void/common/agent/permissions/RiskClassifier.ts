@@ -4,6 +4,7 @@ import { RiskLevel } from './PermissionDecision.js';
 
 const readTools = new Set<string>([
 	'read_file',
+	'read_image',
 	'ls_dir',
 	'get_dir_tree',
 	'search_pathnames_only',

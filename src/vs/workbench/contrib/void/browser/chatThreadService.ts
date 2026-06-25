@@ -10,7 +10,7 @@ import { IStorageService, StorageScope, StorageTarget } from '../../../../platfo
 
 import { URI } from '../../../../base/common/uri.js';
 import { Emitter, Event } from '../../../../base/common/event.js';
-import { ILLMMessageService } from '../common/sendLLMMessageService.js';
+import { ILLMMessageService, MODEL_DOES_NOT_SUPPORT_IMAGE_INPUT_ERROR } from '../common/sendLLMMessageService.js';
 import { CHAT_HISTORY_COMPRESSION, chat_userMessageContent, isABuiltinToolName } from '../common/prompt/prompts.js';
 import { AnthropicReasoning, getErrorMessage, RawToolCallObj, RawToolParamsObj } from '../common/sendLLMMessageTypes.js';
 import { generateUuid } from '../../../../base/common/uuid.js';
@@ -20,7 +20,7 @@ import { approvalTypeOfBuiltinToolName, BuiltinToolCallParams, ToolCallParams, T
 import { IToolsService } from './toolsService.js';
 import { CancellationToken } from '../../../../base/common/cancellation.js';
 import { ILanguageFeaturesService } from '../../../../editor/common/services/languageFeatures.js';
-import { ChatMessage, CheckpointEntry, CodespanLocationLink, StagingSelectionItem, ToolMessage } from '../common/chatThreadServiceTypes.js';
+import { ChatMessage, CheckpointEntry, CodespanLocationLink, ImageAttachment, StagingSelectionItem, ToolMessage } from '../common/chatThreadServiceTypes.js';
 import { Position } from '../../../../editor/common/core/position.js';
 import { IMetricsService } from '../common/metricsService.js';
 import { shorten } from '../../../../base/common/labels.js';
@@ -50,10 +50,25 @@ import { PermissionDecision } from '../common/agent/permissions/PermissionDecisi
 // related to retrying when LLM message has error
 const CHAT_RETRIES = 3
 const RETRY_DELAY = 2500
-const LLM_STREAM_STATE_THROTTLE_MS = 250
+const LLM_STREAM_STATE_THROTTLE_MS = 200
+
+const IMAGE_INPUT_REJECTED_BY_PROVIDER_ERROR = 'The current model endpoint rejected image input. I stopped sending images from this thread to the model so the conversation can continue. Switch to a vision-capable endpoint, or set supportsVision to false for this model.'
+const IMAGE_INPUT_DISABLED_REASON = 'current model endpoint rejected image input'
+const IMAGE_INPUT_UNSUPPORTED_BY_MODEL_REASON = 'selected model does not support image input'
+
+const isImageInputRejectedByProviderError = (message: string | undefined): boolean => {
+	if (!message) return false
+	const lower = message.toLowerCase()
+	return lower.includes('image_url')
+		|| lower.includes('unknown variant `image`')
+		|| lower.includes('unknown variant image')
+		|| lower.includes('unsupported image')
+		|| lower.includes('image input is not supported')
+}
 
 const parallelReadonlyBuiltinTools = new Set<string>([
 	'read_file',
+	'read_image',
 	'ls_dir',
 	'get_dir_tree',
 	'search_pathnames_only',
@@ -329,7 +344,7 @@ export interface IChatThreadService {
 	editUserMessageAndStreamResponse({ userMessage, messageIdx, threadId }: { userMessage: string, messageIdx: number, threadId: string }): Promise<void>;
 
 	// call to add a message
-	addUserMessageAndStreamResponse({ userMessage, threadId }: { userMessage: string, threadId: string }): Promise<void>;
+	addUserMessageAndStreamResponse({ userMessage, threadId, attachments }: { userMessage: string, threadId: string, attachments?: ImageAttachment[] }): Promise<void>;
 
 	// approve/reject
 	approveLatestToolRequest(threadId: string): void;
@@ -600,7 +615,8 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 
 	private _scheduleLLMStreamState(threadId: string, llmInfo: NonNullable<Extract<ThreadStreamState[string], { isRunning: 'LLM' }>['llmInfo']>, interrupt: Promise<() => void>) {
 		this._pendingLLMStreamState.set(threadId, { llmInfo, interrupt })
-		this._getOrCreateLLMStreamScheduler(threadId).schedule()
+		const scheduler = this._getOrCreateLLMStreamScheduler(threadId)
+		if (!scheduler.isScheduled()) scheduler.schedule()
 	}
 
 	private _flushPendingLLMStreamState(threadId: string) {
@@ -1482,8 +1498,25 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 
 				// mark as streaming
 				if (!llmCancelToken) {
-					this._setStreamState(threadId, { isRunning: undefined, error: { message: 'There was an unexpected error when sending your chat message.', fullError: null } })
-					break
+					const llmRes = await messageIsDonePromise
+					const fallbackError = { message: 'There was an unexpected error when sending your chat message.', fullError: null }
+					const isNonRetryableVisionError = llmRes.type === 'llmError' && llmRes.error?.message === MODEL_DOES_NOT_SUPPORT_IMAGE_INPUT_ERROR
+					const isProviderImageInputRejectedError = llmRes.type === 'llmError' && isImageInputRejectedByProviderError(llmRes.error?.message)
+					if (isNonRetryableVisionError) {
+						this._disableImageInputsForThread(threadId, IMAGE_INPUT_UNSUPPORTED_BY_MODEL_REASON)
+					}
+					else if (isProviderImageInputRejectedError) {
+						this._disableImageInputsForThread(threadId, IMAGE_INPUT_DISABLED_REASON)
+					}
+					const error = isProviderImageInputRejectedError
+						? { message: IMAGE_INPUT_REJECTED_BY_PROVIDER_ERROR, fullError: null }
+						: llmRes.type === 'llmError'
+							? llmRes.error ?? fallbackError
+							: fallbackError
+					this._addMessageToThread(threadId, { role: 'assistant', displayContent: error.message, reasoning: '', elapsedMs: elapsedMs(), anthropicReasoning: null })
+					this._setStreamState(threadId, { isRunning: undefined, error })
+					this._addUserCheckpoint({ threadId })
+					return
 				}
 
 				this._setStreamState(threadId, { isRunning: 'LLM', llmInfo: { displayContentSoFar: '', reasoningSoFar: '', toolCallSoFar: null, toolCallsSoFar: null }, interrupt: Promise.resolve(() => this._llmMessageService.abort(llmCancelToken)) })
@@ -1502,8 +1535,10 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 				}
 				// llm res error
 				else if (llmRes.type === 'llmError') {
+					const isNonRetryableVisionError = llmRes.error?.message === MODEL_DOES_NOT_SUPPORT_IMAGE_INPUT_ERROR
+					const isProviderImageInputRejectedError = isImageInputRejectedByProviderError(llmRes.error?.message)
 					// error, should retry
-					if (nAttempts < CHAT_RETRIES) {
+					if (!isNonRetryableVisionError && !isProviderImageInputRejectedError && nAttempts < CHAT_RETRIES) {
 						shouldRetryLLM = true
 						this._setStreamState(threadId, { isRunning: 'idle', interrupt: idleInterruptor })
 						await timeout(RETRY_DELAY)
@@ -1516,10 +1551,19 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 					}
 					// error, but too many attempts
 					else {
-						const { error } = llmRes
+						if (isNonRetryableVisionError) {
+							this._disableImageInputsForThread(threadId, IMAGE_INPUT_UNSUPPORTED_BY_MODEL_REASON)
+						}
+						else if (isProviderImageInputRejectedError) {
+							this._disableImageInputsForThread(threadId, IMAGE_INPUT_DISABLED_REASON)
+						}
+						const error = isProviderImageInputRejectedError
+							? { message: IMAGE_INPUT_REJECTED_BY_PROVIDER_ERROR, fullError: null }
+							: llmRes.error
 						this._flushPendingLLMStreamState(threadId)
 						const { displayContentSoFar, reasoningSoFar, toolCallSoFar } = this.streamState[threadId].llmInfo
-						this._addMessageToThread(threadId, { role: 'assistant', displayContent: displayContentSoFar, reasoning: reasoningSoFar, elapsedMs: elapsedMs(), anthropicReasoning: null })
+						const errorMessage = error?.message ?? 'The model request failed.'
+						this._addMessageToThread(threadId, { role: 'assistant', displayContent: displayContentSoFar || errorMessage, reasoning: reasoningSoFar, elapsedMs: elapsedMs(), anthropicReasoning: null })
 						if (toolCallSoFar) this._addMessageToThread(threadId, { role: 'interrupted_streaming_tool', name: toolCallSoFar.name, mcpServerName: this._computeMCPServerOfToolName(toolCallSoFar.name) })
 
 						this._setStreamState(threadId, { isRunning: undefined, error })
@@ -1908,7 +1952,7 @@ We only need to do it for files that were edited since `from`, ie files between 
 	}
 
 
-	private async _addUserMessageAndStreamResponse({ userMessage, _chatSelections, threadId }: { userMessage: string, _chatSelections?: StagingSelectionItem[], threadId: string }) {
+	private async _addUserMessageAndStreamResponse({ userMessage, _chatSelections, threadId, attachments }: { userMessage: string, _chatSelections?: StagingSelectionItem[], threadId: string, attachments?: ImageAttachment[] }) {
 		const thread = this.state.allThreads[threadId]
 		if (!thread) return // should never happen
 
@@ -1928,7 +1972,7 @@ We only need to do it for files that were edited since `from`, ie files between 
 		const currSelns: StagingSelectionItem[] = _chatSelections ?? thread.state.stagingSelections
 
 		const userMessageContent = await chat_userMessageContent(instructions, currSelns, { directoryStrService: this._directoryStringService, fileService: this._fileService }) // user message + names of files (NOT content)
-		const userHistoryElt: ChatMessage = { role: 'user', content: userMessageContent, displayContent: instructions, selections: currSelns, state: defaultMessageState }
+		const userHistoryElt: ChatMessage = { role: 'user', content: userMessageContent, displayContent: instructions, selections: currSelns, attachments: attachments?.length ? attachments : undefined, state: defaultMessageState }
 		this._addMessageToThread(threadId, userHistoryElt)
 
 		this._setThreadState(threadId, { currCheckpointIdx: null }) // no longer at a checkpoint because started streaming
@@ -1945,7 +1989,7 @@ We only need to do it for files that were edited since `from`, ie files between 
 	}
 
 
-	async addUserMessageAndStreamResponse({ userMessage, _chatSelections, threadId }: { userMessage: string, _chatSelections?: StagingSelectionItem[], threadId: string }) {
+	async addUserMessageAndStreamResponse({ userMessage, _chatSelections, threadId, attachments }: { userMessage: string, _chatSelections?: StagingSelectionItem[], threadId: string, attachments?: ImageAttachment[] }) {
 		const thread = this.state.allThreads[threadId];
 		if (!thread) return
 
@@ -1968,7 +2012,7 @@ We only need to do it for files that were edited since `from`, ie files between 
 		}
 
 		// Now call the original method to add the user message and stream the response
-		await this._addUserMessageAndStreamResponse({ userMessage, _chatSelections, threadId });
+		await this._addUserMessageAndStreamResponse({ userMessage, _chatSelections, threadId, attachments });
 
 	}
 
@@ -2372,6 +2416,60 @@ We only need to do it for files that were edited since `from`, ie files between 
 		}
 		this._storeAllThreads(newThreads)
 		this._setState({ allThreads: newThreads }) // the current thread just changed (it had a message added to it)
+	}
+
+	private _disableImageInputsForThread(threadId: string, disabledReason: string) {
+		const { allThreads } = this.state
+		const oldThread = allThreads[threadId]
+		if (!oldThread) return
+
+		let didChange = false
+		const messages = oldThread.messages.map((message): ChatMessage => {
+			if (message.role === 'user' && message.attachments?.some(attachment => !attachment.isLLMDisabled)) {
+				didChange = true
+				return {
+					...message,
+					attachments: message.attachments.map(attachment => attachment.isLLMDisabled ? attachment : {
+						...attachment,
+						isLLMDisabled: true,
+						disabledReason,
+					})
+				}
+			}
+
+			if (message.role === 'tool' && message.type === 'success' && message.name === 'read_image') {
+				const result = message.result as { attachment?: ImageAttachment }
+				if (result.attachment && !result.attachment.isLLMDisabled) {
+					didChange = true
+					return {
+						...message,
+						result: {
+							...result,
+							attachment: {
+								...result.attachment,
+								isLLMDisabled: true,
+								disabledReason,
+							}
+						}
+					} as ChatMessage
+				}
+			}
+
+			return message
+		})
+
+		if (!didChange) return
+
+		const newThreads = {
+			...allThreads,
+			[oldThread.id]: {
+				...oldThread,
+				lastModified: new Date().toISOString(),
+				messages,
+			}
+		}
+		this._storeAllThreads(newThreads)
+		this._setState({ allThreads: newThreads })
 	}
 
 	// sets the currently selected message (must be undefined if no message is selected)

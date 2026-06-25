@@ -23,8 +23,8 @@ import { VOID_OPEN_SETTINGS_ACTION_ID } from '../../../voidSettingsPane.js';
 	import { WarningBox } from '../void-settings-tsx/WarningBox.js';
 	import { getModelCapabilities, getIsReasoningEnabledState } from '../../../../common/modelCapabilities.js';
 	import { COMPRESSING_HISTORY_LABEL } from '../../../../common/prompt/prompts.js';
-import { AlertTriangle, File, Ban, Check, ChevronRight, Dot, FileIcon, Pencil, Undo, Undo2, X, Flag, Copy as CopyIcon, Info, CirclePlus, Ellipsis, CircleEllipsis, Folder, ALargeSmall, TypeOutline, Text } from 'lucide-react';
-import { ChatMessage, CheckpointEntry, StagingSelectionItem, ToolMessage } from '../../../../common/chatThreadServiceTypes.js';
+import { AlertTriangle, File, Ban, Check, ChevronRight, Dot, FileIcon, Pencil, Undo, Undo2, X, Flag, Copy as CopyIcon, Info, CirclePlus, Ellipsis, CircleEllipsis, Folder, ALargeSmall, TypeOutline, Text, ImagePlus } from 'lucide-react';
+import { ChatMessage, CheckpointEntry, ImageAttachment, StagingSelectionItem, ToolMessage } from '../../../../common/chatThreadServiceTypes.js';
 import { approvalTypeOfBuiltinToolName, BuiltinToolCallParams, BuiltinToolName, ToolName, LintErrorItem, ToolApprovalType, toolApprovalTypes } from '../../../../common/toolsServiceTypes.js';
 import { CopyButton, EditToolAcceptRejectButtonsHTML, IconShell1, JumpToFileButton, JumpToTerminalButton, StatusIndicator, StatusIndicatorForApplyButton, useApplyStreamState, useEditToolStreamState } from '../markdown/ApplyBlockHoverButtons.js';
 import { IsRunningType } from '../../../chatThreadService.js';
@@ -36,6 +36,105 @@ import { ToolApprovalTypeSwitch } from '../void-settings-tsx/Settings.js';
 
 import { persistentTerminalNameOfId } from '../../../terminalToolService.js';
 import { removeMCPToolNamePrefix } from '../../../../common/mcpServiceTypes.js';
+
+const SUPPORTED_IMAGE_MIME_TYPES = new Set<ImageAttachment['mimeType']>(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
+const MAX_IMAGE_ATTACHMENTS = 4
+const MAX_IMAGE_ATTACHMENT_BYTES = 5 * 1024 * 1024
+const MAX_ORIGINAL_IMAGE_ATTACHMENT_BYTES = 20 * 1024 * 1024
+const MAX_IMAGE_ATTACHMENT_EDGE = 1568
+const COMPRESSED_IMAGE_QUALITY = 0.86
+
+const dataUrlSizeBytes = (dataUrl: string) => {
+	const base64 = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl
+	return Math.floor(base64.length * 3 / 4)
+}
+
+const fileToDataUrl = (file: File): Promise<string> => {
+	return new Promise((resolve, reject) => {
+		const reader = new FileReader()
+		reader.onerror = () => reject(reader.error ?? new Error(`Could not read ${file.name}`))
+		reader.onload = () => {
+			const dataUrl = typeof reader.result === 'string' ? reader.result : ''
+			if (!dataUrl) {
+				reject(new Error(`Could not read ${file.name}`))
+				return
+			}
+			resolve(dataUrl)
+		}
+		reader.readAsDataURL(file)
+	})
+}
+
+const loadImage = (dataUrl: string, name: string): Promise<HTMLImageElement> => {
+	return new Promise((resolve, reject) => {
+		const image = new Image()
+		image.onload = () => resolve(image)
+		image.onerror = () => reject(new Error(`Could not decode ${name}`))
+		image.src = dataUrl
+	})
+}
+
+const compressImageDataUrl = async (file: File, dataUrl: string): Promise<{ dataUrl: string; mimeType: ImageAttachment['mimeType']; sizeBytes: number; width?: number; height?: number }> => {
+	const originalSize = dataUrlSizeBytes(dataUrl)
+	const originalMimeType = file.type as ImageAttachment['mimeType']
+
+	const image = await loadImage(dataUrl, file.name)
+	const width = image.naturalWidth || undefined
+	const height = image.naturalHeight || undefined
+
+	if (originalMimeType === 'image/gif' || !width || !height) {
+		return { dataUrl, mimeType: originalMimeType, sizeBytes: originalSize, width, height }
+	}
+
+	const scale = Math.min(1, MAX_IMAGE_ATTACHMENT_EDGE / Math.max(width, height))
+	const targetWidth = Math.max(1, Math.round(width * scale))
+	const targetHeight = Math.max(1, Math.round(height * scale))
+	const canvas = document.createElement('canvas')
+	canvas.width = targetWidth
+	canvas.height = targetHeight
+
+	const context = canvas.getContext('2d')
+	if (!context) return { dataUrl, mimeType: originalMimeType, sizeBytes: originalSize, width, height }
+
+	context.drawImage(image, 0, 0, targetWidth, targetHeight)
+	const outputMimeType: ImageAttachment['mimeType'] = originalMimeType === 'image/png' ? 'image/webp' : originalMimeType
+	const compressedDataUrl = canvas.toDataURL(outputMimeType, COMPRESSED_IMAGE_QUALITY)
+	const compressedSize = dataUrlSizeBytes(compressedDataUrl)
+
+	if (compressedSize >= originalSize) {
+		return { dataUrl, mimeType: originalMimeType, sizeBytes: originalSize, width, height }
+	}
+
+	return { dataUrl: compressedDataUrl, mimeType: outputMimeType, sizeBytes: compressedSize, width: targetWidth, height: targetHeight }
+}
+
+const readImageAttachment = (file: File): Promise<ImageAttachment> => {
+	return (async () => {
+		if (!SUPPORTED_IMAGE_MIME_TYPES.has(file.type as ImageAttachment['mimeType'])) {
+			throw new Error(`Unsupported image type: ${file.type || file.name}`)
+		}
+		if (file.size > MAX_ORIGINAL_IMAGE_ATTACHMENT_BYTES) {
+			throw new Error(`${file.name} is larger than 20MB`)
+		}
+
+		const originalDataUrl = await fileToDataUrl(file)
+		const compressed = await compressImageDataUrl(file, originalDataUrl)
+		if (compressed.sizeBytes > MAX_IMAGE_ATTACHMENT_BYTES) {
+			throw new Error(`${file.name} is still larger than 5MB after compression`)
+		}
+
+		return {
+			type: 'image',
+			id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+			name: file.name,
+			mimeType: compressed.mimeType,
+			sizeBytes: compressed.sizeBytes,
+			dataUrl: compressed.dataUrl,
+			width: compressed.width,
+			height: compressed.height,
+		}
+	})()
+}
 
 
 
@@ -1079,6 +1178,13 @@ const UserMessageComponent = ({ chatMessage, messageIdx, isCheckpointGhost, curr
 	if (mode === 'display') {
 		chatbubbleContents = <>
 			<SelectedFiles type='past' messageIdx={messageIdx} selections={chatMessage.selections || []} />
+			{!!chatMessage.attachments?.length && <div className='flex flex-wrap gap-2 pb-2'>
+				{chatMessage.attachments.map(attachment => (
+					<div key={attachment.id} className='relative h-20 w-20 overflow-hidden rounded border border-void-border-3 bg-void-bg-2'>
+						<img src={attachment.dataUrl} alt={attachment.name} title={attachment.name} className='h-full w-full object-cover' />
+					</div>
+				))}
+			</div>}
 			<span className='px-0.5'>{chatMessage.displayContent}</span>
 		</>
 	}
@@ -1362,7 +1468,7 @@ const AssistantMessageComponent = ({ chatMessage, isCheckpointGhost, isCommitted
 		}
 		{isCommitted && chatMessage.elapsedMs !== undefined ?
 			<div className={`${isCheckpointGhost ? 'opacity-50' : ''} px-2 text-xs text-void-fg-4 opacity-80 select-none`}>
-				已处理 {formatElapsed(chatMessage.elapsedMs)}
+				执行完成 {formatElapsed(chatMessage.elapsedMs)}
 			</div>
 			: null}
 	</>
@@ -1399,6 +1505,7 @@ const loadingTitleWrapper = (item: React.ReactNode): React.ReactNode => {
 
 const titleOfBuiltinToolName = {
 	'read_file': { done: 'Read file', proposed: 'Read file', running: loadingTitleWrapper('Reading file') },
+	'read_image': { done: 'Read image', proposed: 'Read image', running: loadingTitleWrapper('Reading image') },
 	'ls_dir': { done: 'Inspected folder', proposed: 'Inspect folder', running: loadingTitleWrapper('Inspecting folder') },
 	'get_dir_tree': { done: 'Inspected folder tree', proposed: 'Inspect folder tree', running: loadingTitleWrapper('Inspecting folder tree') },
 	'search_pathnames_only': { done: 'Searched by file name', proposed: 'Search by file name', running: loadingTitleWrapper('Searching by file name') },
@@ -1476,6 +1583,13 @@ const toolNameToDesc = (toolName: BuiltinToolName, _toolParams: BuiltinToolCallP
 	const x = {
 		'read_file': () => {
 			const toolParams = _toolParams as BuiltinToolCallParams['read_file']
+			return {
+				desc1: getBasename(toolParams.uri.fsPath),
+				desc1Info: getRelative(toolParams.uri, accessor),
+			};
+		},
+		'read_image': () => {
+			const toolParams = _toolParams as BuiltinToolCallParams['read_image']
 			return {
 				desc1: getBasename(toolParams.uri.fsPath),
 				desc1Info: getRelative(toolParams.uri, accessor),
@@ -2073,6 +2187,39 @@ const builtinToolNameToComponent: { [T in BuiltinToolName]: { resultWrapper: Res
 				componentParams.bottomChildren = <BottomChildren title='Error'>
 					<CodeChildren>
 						{result}
+					</CodeChildren>
+				</BottomChildren>
+			}
+
+			return <ToolHeaderWrapper {...componentParams} />
+		},
+	},
+	'read_image': {
+		resultWrapper: ({ toolMessage }) => {
+			const accessor = useAccessor()
+			const title = getTitle(toolMessage)
+			const { desc1, desc1Info } = toolNameToDesc(toolMessage.name, toolMessage.params, accessor)
+			const icon = null
+
+			if (toolMessage.type === 'tool_request') return null
+			if (toolMessage.type === 'running_now') return null
+
+			const isError = toolMessage.type === 'tool_error'
+			const isRejected = toolMessage.type === 'rejected'
+			const componentParams: ToolHeaderParams = { title, desc1, desc1Info, isError, icon, isRejected }
+
+			if (toolMessage.type === 'success') {
+				const { attachment } = toolMessage.result
+				componentParams.bottomChildren = <BottomChildren title={attachment.name}>
+					<div className='flex gap-3'>
+						<img src={attachment.dataUrl} alt={attachment.name} className='max-h-40 max-w-60 rounded border border-void-border-3 object-contain' />
+					</div>
+				</BottomChildren>
+			}
+			else if (toolMessage.type === 'tool_error') {
+				componentParams.bottomChildren = <BottomChildren title='Error'>
+					<CodeChildren>
+						{toolMessage.result}
 					</CodeChildren>
 				</BottomChildren>
 			}
@@ -3128,6 +3275,7 @@ export const SidebarChat = () => {
 	const accessor = useAccessor()
 	const commandService = accessor.get('ICommandService')
 	const chatThreadsService = accessor.get('IChatThreadService')
+	const notificationService = accessor.get('INotificationService')
 
 	const settingsState = useSettingsState()
 	// ----- HIGHER STATE -----
@@ -3157,8 +3305,24 @@ export const SidebarChat = () => {
 	// state of current message
 	const initVal = ''
 	const [instructionsAreEmpty, setInstructionsAreEmpty] = useState(!initVal)
+	const [imageAttachments, setImageAttachments] = useState<ImageAttachment[]>([])
+	const imageInputRef = useRef<HTMLInputElement | null>(null)
 
-	const isDisabled = instructionsAreEmpty || !!isFeatureNameDisabled('Chat', settingsState)
+	const chatModelSelection = settingsState.modelSelectionOfFeature.Chat
+	const chatModelSupportsVision = chatModelSelection
+		? getModelCapabilities(chatModelSelection.providerName, chatModelSelection.modelName, settingsState.overridesOfModel).supportsVision
+		: undefined
+	const canAttachImages = chatModelSupportsVision !== false
+	const hasUnsupportedImageAttachments = imageAttachments.length > 0 && !canAttachImages
+	const imageAttachmentWarning = imageAttachments.length > 0
+		? chatModelSupportsVision === false
+			? 'The selected model does not support image input.'
+			: chatModelSupportsVision === undefined
+				? 'Void is not sure whether the selected model supports images.'
+				: null
+		: null
+
+	const isDisabled = (instructionsAreEmpty && imageAttachments.length === 0) || hasUnsupportedImageAttachments || !!isFeatureNameDisabled('Chat', settingsState)
 
 	const sidebarRef = useRef<HTMLDivElement>(null)
 	const scrollContainerRef = useRef<HTMLDivElement | null>(null)
@@ -3171,18 +3335,21 @@ export const SidebarChat = () => {
 
 		// send message to LLM
 		const userMessage = _forceSubmit || textAreaRef.current?.value || ''
+		const attachmentsToSend = _forceSubmit ? [] : imageAttachments
 
 		try {
-			await chatThreadsService.addUserMessageAndStreamResponse({ userMessage, threadId })
+			await chatThreadsService.addUserMessageAndStreamResponse({ userMessage, threadId, attachments: attachmentsToSend })
 		} catch (e) {
 			console.error('Error while sending message in chat:', e)
 		}
 
 		setSelections([]) // clear staging
+		setImageAttachments([])
+		if (imageInputRef.current) imageInputRef.current.value = ''
 		textAreaFnsRef.current?.setValue('')
 		textAreaRef.current?.focus() // focus input after submit
 
-	}, [chatThreadsService, isDisabled, isRunning, textAreaRef, textAreaFnsRef, setSelections, settingsState])
+	}, [chatThreadsService, imageAttachments, isDisabled, isRunning, textAreaRef, textAreaFnsRef, setSelections, settingsState])
 
 	const onAbort = async () => {
 		const threadId = currentThread.id
@@ -3349,6 +3516,44 @@ export const SidebarChat = () => {
 		}
 	}, [onSubmit, onAbort, isRunning])
 
+	const onPickImages = useCallback(async (files: FileList | null) => {
+		if (!files?.length) return
+		if (!canAttachImages) {
+			notificationService.error('The selected model does not support image input.')
+			return
+		}
+
+		const remainingSlots = MAX_IMAGE_ATTACHMENTS - imageAttachments.length
+		if (remainingSlots <= 0) return
+
+		try {
+			if (chatModelSupportsVision === undefined) {
+				notificationService.info('Void is not sure whether the selected model supports images. It will send them anyway.')
+			}
+			const attachments = await Promise.all(Array.from(files).slice(0, remainingSlots).map(file => readImageAttachment(file)))
+			setImageAttachments(prev => [...prev, ...attachments].slice(0, MAX_IMAGE_ATTACHMENTS))
+		} catch (e) {
+			console.error('Error while attaching image:', e)
+			notificationService.error(e instanceof Error ? e.message : `${e}`)
+		} finally {
+			if (imageInputRef.current) imageInputRef.current.value = ''
+		}
+	}, [canAttachImages, chatModelSupportsVision, imageAttachments.length, notificationService])
+
+	const onAttachImageClick = useCallback((e: React.MouseEvent<HTMLButtonElement>) => {
+		e.stopPropagation()
+		if (isRunning) return
+		if (!canAttachImages) {
+			notificationService.error('The selected model does not support image input.')
+			return
+		}
+		if (imageAttachments.length >= MAX_IMAGE_ATTACHMENTS) {
+			notificationService.info(`You can attach up to ${MAX_IMAGE_ATTACHMENTS} images.`)
+			return
+		}
+		imageInputRef.current?.click()
+	}, [canAttachImages, imageAttachments.length, isRunning, notificationService])
+
 	const inputChatArea = <VoidChatArea
 		featureName='Chat'
 		onSubmit={() => onSubmit()}
@@ -3361,6 +3566,36 @@ export const SidebarChat = () => {
 		setSelections={setSelections}
 		onClickAnywhere={() => { textAreaRef.current?.focus() }}
 	>
+		<input
+			ref={imageInputRef}
+			type='file'
+			accept='image/png,image/jpeg,image/webp,image/gif'
+			multiple
+			className='hidden'
+			onChange={e => onPickImages(e.currentTarget.files)}
+		/>
+		{!!imageAttachments.length && <div className='flex flex-wrap gap-2 px-0.5 pb-2'>
+			{imageAttachments.map(attachment => (
+				<div key={attachment.id} className='group relative h-16 w-16 overflow-hidden rounded border border-void-border-3 bg-void-bg-2'>
+					<img src={attachment.dataUrl} alt={attachment.name} title={attachment.name} className='h-full w-full object-cover' />
+					<button
+						type='button'
+						title='Remove image'
+						className='absolute right-1 top-1 hidden h-5 w-5 items-center justify-center rounded bg-black/70 text-white group-hover:flex'
+						onClick={e => {
+							e.stopPropagation()
+							setImageAttachments(prev => prev.filter(item => item.id !== attachment.id))
+						}}
+					>
+						<X size={13} />
+					</button>
+				</div>
+			))}
+		</div>}
+		{imageAttachmentWarning && <div className='flex items-center gap-1 px-0.5 pb-2 text-xs text-void-fg-3'>
+			<AlertTriangle size={13} />
+			<span>{imageAttachmentWarning}</span>
+		</div>}
 		<VoidInputBox2
 			enableAtToMention
 			className={`min-h-[81px] px-0.5 py-0.5`}
@@ -3372,6 +3607,18 @@ export const SidebarChat = () => {
 			fnsRef={textAreaFnsRef}
 			multiline={true}
 		/>
+		<div className='flex items-center justify-between px-0.5 pt-2'>
+			<button
+				type='button'
+				title={canAttachImages ? 'Attach image' : 'Selected model does not support image input'}
+				className={`flex h-7 w-7 items-center justify-center rounded text-void-fg-3 hover:bg-void-bg-2 hover:text-void-fg-1 ${!canAttachImages || imageAttachments.length >= MAX_IMAGE_ATTACHMENTS ? 'opacity-50' : ''}`}
+				aria-disabled={!canAttachImages || imageAttachments.length >= MAX_IMAGE_ATTACHMENTS || !!isRunning}
+				disabled={!!isRunning}
+				onClick={onAttachImageClick}
+			>
+				<ImagePlus size={17} />
+			</button>
+		</div>
 
 	</VoidChatArea>
 

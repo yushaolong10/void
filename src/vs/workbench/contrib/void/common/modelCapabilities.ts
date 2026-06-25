@@ -186,6 +186,7 @@ export type VoidStaticModelInfo = { // not stateful
 	supportsSystemMessage: false | 'system-role' | 'developer-role' | 'separated'; // typically you should use 'system-role'. 'separated' means the system message is passed as a separate field (e.g. anthropic)
 	specialToolFormat?: 'openai-style' | 'anthropic-style' | 'gemini-style', // typically you should use 'openai-style'. null means "can't call tools by default", and asks the LLM to output XML in agent mode
 	supportsFIM: boolean; // whether the model was specifically designed for autocomplete or "FIM" ("fill-in-middle" format)
+	supportsVision?: boolean; // whether Void can send image inputs to this model
 
 	additionalOpenAIPayload?: { [key: string]: string } // additional payload in the message body for requests that are openai-compatible (ollama, vllm, openai, openrouter, etc)
 
@@ -228,6 +229,7 @@ export const modelOverrideKeys = [
 	'supportsSystemMessage',
 	'specialToolFormat',
 	'supportsFIM',
+	'supportsVision',
 	'reasoningCapabilities',
 	'additionalOpenAIPayload'
 ] as const
@@ -267,6 +269,44 @@ const defaultModelOptions = {
 	supportsFIM: false,
 	reasoningCapabilities: false,
 } as const satisfies VoidStaticModelInfo
+
+const inferSupportsVision = (providerName: ProviderName, modelName: string): boolean | undefined => {
+	const lower = modelName.toLowerCase()
+
+	if (providerName === 'anthropic') return lower.includes('claude')
+	if (providerName === 'deepseek') return false
+	if (providerName === 'gemini') return false // Void does not send image parts on the Gemini path yet.
+
+	if (providerName === 'openAI') {
+		if (lower.includes('gpt-4.1') || lower.includes('gpt-4-1')) return true
+		if (lower.includes('gpt-4o')) return true
+		if (lower.includes('o3') || lower.includes('o4')) return true
+		return false
+	}
+
+	if (providerName === 'openRouter') {
+		if (lower.includes('deepseek')) return false
+		if (lower.includes('claude')) return true
+		if (lower.includes('gemini')) return true
+		if (lower.includes('gpt-4.1') || lower.includes('gpt-4-1') || lower.includes('gpt-4o')) return true
+	}
+
+	if (lower.includes('deepseek')) return false
+	if (lower.includes('claude')) return true
+	if (lower.includes('gpt-4.1') || lower.includes('gpt-4-1') || lower.includes('gpt-4o')) return true
+
+	return undefined
+}
+
+const withInferredVisionSupport = <T extends VoidStaticModelInfo>(
+	providerName: ProviderName,
+	modelName: string,
+	info: T,
+): T => {
+	if (info.supportsVision !== undefined) return info
+	const supportsVision = inferSupportsVision(providerName, modelName)
+	return supportsVision === undefined ? info : { ...info, supportsVision }
+}
 
 // TODO!!! double check all context sizes below
 // TODO!!! add openrouter common models
@@ -1527,16 +1567,16 @@ export const getModelCapabilities = (
 	for (const modelName_ in modelOptions) {
 		const lowercaseModelName_ = modelName_.toLowerCase()
 		if (lowercaseModelName === lowercaseModelName_) {
-			return { ...modelOptions[modelName], ...overrides, modelName, recognizedModelName: modelName, isUnrecognizedModel: false };
+			return withInferredVisionSupport(providerName, modelName, { ...modelOptions[modelName], ...overrides, modelName, recognizedModelName: modelName, isUnrecognizedModel: false });
 		}
 	}
 
 	const result = modelOptionsFallback(modelName)
 	if (result) {
-		return { ...result, ...overrides, modelName: result.modelName, isUnrecognizedModel: false };
+		return withInferredVisionSupport(providerName, modelName, { ...result, ...overrides, modelName: result.modelName, isUnrecognizedModel: false });
 	}
 
-	return { modelName, ...defaultModelOptions, ...overrides, isUnrecognizedModel: true };
+	return withInferredVisionSupport(providerName, modelName, { modelName, ...defaultModelOptions, ...overrides, isUnrecognizedModel: true });
 }
 
 // non-model settings
