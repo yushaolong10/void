@@ -45,12 +45,21 @@ import { AgentRun } from '../common/agent/runtime/AgentRun.js';
 import { ToolContext } from '../common/agent/tools/ToolDefinition.js';
 import { IAgentExtensionService } from './agent/AgentExtensionService.js';
 import { PermissionDecision } from '../common/agent/permissions/PermissionDecision.js';
+import { ExecutionPlan, ExecutionPlanStep, ExecutionPlanStepStatus } from '../common/agent/execution/ExecutionPlan.js';
 
 
 // related to retrying when LLM message has error
 const CHAT_RETRIES = 3
 const RETRY_DELAY = 2500
 const LLM_STREAM_STATE_THROTTLE_MS = 200
+const MAX_AGENT_PLAN_AUTO_CONTINUATIONS = 20
+
+const AGENT_PLAN_STEP_IDS = {
+	recon: 'recon',
+	plan: 'plan',
+	execute: 'execute',
+	verify: 'verify',
+} as const
 
 const IMAGE_INPUT_REJECTED_BY_PROVIDER_ERROR = 'The current model endpoint rejected image input. I stopped sending images from this thread to the model so the conversation can continue. Switch to a vision-capable endpoint, or set supportsVision to false for this model.'
 const IMAGE_INPUT_DISABLED_REASON = 'current model endpoint rejected image input'
@@ -147,6 +156,15 @@ const defaultMessageState: UserMessageState = {
 	stagingSelections: [],
 	isBeingEdited: false,
 }
+type AgentExecutionPlanState = {
+	plan: ExecutionPlan;
+	startedStepIds: Set<string>;
+	completedStepIds: Set<string>;
+	blockedStepIds: Set<string>;
+	currentStepId: string | null;
+	autoContinuations: number;
+}
+type ToolRunResult = { awaitingUserApproval?: boolean, interrupted?: boolean, successfulToolName?: string }
 type EarlyReadonlyToolRun = {
 	toolCall: RawToolCallObj;
 	promise: Promise<ChatMessage & { role: 'tool' }>;
@@ -370,6 +388,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 
 	readonly streamState: ThreadStreamState = {}
 	state: ThreadsState // allThreads is persisted, currentThread is not
+	private readonly _agentPlanStateByRunId = new Map<string, AgentExecutionPlanState>()
 
 	// used in checkpointing
 	// private readonly _userModifiedFilesToCheckInCheckpoints = new LRUCache<string, null>(50)
@@ -862,6 +881,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 		if (!run) return
 		this._agentBridge.runtime.finishRun(threadId, run.runId, summary)
 		this._agentRunOfThreadId.delete(threadId)
+		this._agentPlanStateByRunId.delete(run.runId)
 	}
 
 	private _failAgentRun(threadId: string, error: string): void {
@@ -869,6 +889,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 		if (!run) return
 		this._agentBridge.runtime.failRun(threadId, run.runId, error)
 		this._agentRunOfThreadId.delete(threadId)
+		this._agentPlanStateByRunId.delete(run.runId)
 		this._runAgentHookSafely({ event: 'on_run_failed', metadata: { threadId, error } })
 	}
 
@@ -879,6 +900,225 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 		catch {
 			// Hooks are user automation; failures should not corrupt the agent control flow.
 		}
+	}
+
+	private _createAgentExecutionPlan(goal: string): ExecutionPlan {
+		return {
+			id: generateUuid(),
+			goal,
+			steps: [
+				{
+					id: AGENT_PLAN_STEP_IDS.recon,
+					title: 'Recon',
+					description: 'Inspect the relevant workspace context, current files, manifests, skills, tests, and constraints needed for the task.',
+					status: 'pending',
+				},
+				{
+					id: AGENT_PLAN_STEP_IDS.plan,
+					title: 'Plan',
+					description: 'Choose the smallest correct approach before taking action. Follow workspace instructions and active skills.',
+					status: 'pending',
+					dependsOn: [AGENT_PLAN_STEP_IDS.recon],
+				},
+				{
+					id: AGENT_PLAN_STEP_IDS.execute,
+					title: 'Execute',
+					description: 'Apply the change or produce the requested work with tools when files, commands, or repository state are involved.',
+					status: 'pending',
+					dependsOn: [AGENT_PLAN_STEP_IDS.plan],
+				},
+				{
+					id: AGENT_PLAN_STEP_IDS.verify,
+					title: 'Verify',
+					description: 'Validate the result with the smallest useful checks, then summarize what changed and what remains unverified.',
+					status: 'pending',
+					dependsOn: [AGENT_PLAN_STEP_IDS.execute],
+				},
+			],
+		}
+	}
+
+	private _ensureAgentPlanState(threadId: string): AgentExecutionPlanState {
+		const run = this._currentOrStartAgentRun(threadId)
+		const existing = this._agentPlanStateByRunId.get(run.runId)
+		if (existing) return existing
+
+		const plan = this._createAgentExecutionPlan(run.goal)
+		const state: AgentExecutionPlanState = {
+			plan,
+			startedStepIds: new Set<string>(),
+			completedStepIds: new Set<string>(),
+			blockedStepIds: new Set<string>(),
+			currentStepId: plan.steps[0]?.id ?? null,
+			autoContinuations: 0,
+		}
+		this._agentPlanStateByRunId.set(run.runId, state)
+		this._agentBridge.emit({ type: 'plan.created', sessionId: threadId, runId: run.runId, plan, createdAt: Date.now() })
+		this._startCurrentAgentPlanStep(threadId, state)
+		return state
+	}
+
+	private _getAgentPlanState(threadId: string): AgentExecutionPlanState | undefined {
+		const run = this._agentRunOfThreadId.get(threadId)
+		if (!run) return undefined
+		return this._agentPlanStateByRunId.get(run.runId)
+	}
+
+	private _currentAgentPlanStep(state: AgentExecutionPlanState): ExecutionPlanStep | undefined {
+		return state.plan.steps.find(step => step.id === state.currentStepId)
+	}
+
+	private _isAgentPlanComplete(state: AgentExecutionPlanState): boolean {
+		return state.plan.steps.every(step => state.completedStepIds.has(step.id))
+	}
+
+	private _updateAgentPlanStepStatus(state: AgentExecutionPlanState, stepId: string, status: ExecutionPlanStepStatus): ExecutionPlanStep | undefined {
+		let updatedStep: ExecutionPlanStep | undefined
+		state.plan = {
+			...state.plan,
+			steps: state.plan.steps.map(step => {
+				if (step.id !== stepId) return step
+				updatedStep = { ...step, status }
+				return updatedStep
+			}),
+		}
+		return updatedStep
+	}
+
+	private _startCurrentAgentPlanStep(threadId: string, state: AgentExecutionPlanState): void {
+		const run = this._currentOrStartAgentRun(threadId)
+		const step = this._currentAgentPlanStep(state)
+		if (!step || state.startedStepIds.has(step.id) || state.completedStepIds.has(step.id) || state.blockedStepIds.has(step.id)) return
+		const startedStep = this._updateAgentPlanStepStatus(state, step.id, 'running') ?? step
+		state.startedStepIds.add(step.id)
+		this._agentBridge.emit({ type: 'plan.step.started', sessionId: threadId, runId: run.runId, step: startedStep, startedAt: Date.now() })
+	}
+
+	private _completeAgentPlanStep(threadId: string, state: AgentExecutionPlanState, stepId: string): void {
+		if (state.completedStepIds.has(stepId)) return
+		const run = this._currentOrStartAgentRun(threadId)
+		const step = this._updateAgentPlanStepStatus(state, stepId, 'complete')
+		if (!step) return
+		state.completedStepIds.add(stepId)
+		this._agentBridge.emit({ type: 'plan.step.completed', sessionId: threadId, runId: run.runId, step, completedAt: Date.now() })
+		if (state.currentStepId === stepId) {
+			const nextStep = state.plan.steps.find(candidate => !state.completedStepIds.has(candidate.id) && !state.blockedStepIds.has(candidate.id))
+			state.currentStepId = nextStep?.id ?? null
+			this._startCurrentAgentPlanStep(threadId, state)
+		}
+	}
+
+	private _blockCurrentAgentPlanStep(threadId: string, state: AgentExecutionPlanState, reason: string): void {
+		const step = this._currentAgentPlanStep(state)
+		if (!step || state.blockedStepIds.has(step.id)) return
+		const run = this._currentOrStartAgentRun(threadId)
+		const blockedStep = this._updateAgentPlanStepStatus(state, step.id, 'blocked') ?? step
+		state.blockedStepIds.add(step.id)
+		this._agentBridge.emit({ type: 'plan.step.blocked', sessionId: threadId, runId: run.runId, step: blockedStep, reason, blockedAt: Date.now() })
+	}
+
+	private _completeAgentPlanThrough(threadId: string, state: AgentExecutionPlanState, stepId: string): void {
+		for (const step of state.plan.steps) {
+			this._completeAgentPlanStep(threadId, state, step.id)
+			if (step.id === stepId) break
+		}
+	}
+
+	private _isWriteToolName(toolName: string): boolean {
+		return parallelWriteBuiltinTools.has(toolName)
+			|| toolName === 'delete_file_or_folder'
+			|| toolName === 'git_apply_patch'
+			|| toolName === 'git_commit'
+	}
+
+	private _isVerificationToolName(toolName: string): boolean {
+		return toolName === 'run_tests'
+			|| toolName === 'read_lint_errors'
+			|| toolName === 'read_test_failures'
+			|| toolName === 'git_diff'
+			|| toolName === 'review_snapshot'
+	}
+
+	private _advanceAgentPlanAfterTools(threadId: string, successfulToolNames: readonly string[]): void {
+		if (!successfulToolNames.length) return
+		const state = this._getAgentPlanState(threadId)
+		if (!state || this._isAgentPlanComplete(state)) return
+		state.autoContinuations = 0
+		this._completeAgentPlanThrough(threadId, state, AGENT_PLAN_STEP_IDS.recon)
+		if (successfulToolNames.some(toolName => this._isWriteToolName(toolName))) {
+			this._completeAgentPlanThrough(threadId, state, AGENT_PLAN_STEP_IDS.execute)
+		}
+		if (successfulToolNames.some(toolName => this._isVerificationToolName(toolName))) {
+			this._completeAgentPlanThrough(threadId, state, AGENT_PLAN_STEP_IDS.verify)
+		}
+	}
+
+	private _assistantTextLooksBlocked(text: string): boolean {
+		const normalized = text.toLowerCase()
+		return /需要(你|用户|提供|确认|批准)/.test(normalized)
+			|| /无法继续/.test(normalized)
+			|| /\b(blocked|cannot continue|can't continue|need your|need the user|please provide|waiting for)\b/.test(normalized)
+	}
+
+	private _assistantTextLooksComplete(text: string): boolean {
+		const normalized = text.toLowerCase()
+		return /已完成|任务完成|完成了|验证通过/.test(normalized)
+			|| /\b(done|completed|finished|verified)\b/.test(normalized)
+	}
+
+	private _addInternalAgentPlanMessage(threadId: string, state: AgentExecutionPlanState, reason: string): void {
+		const step = this._currentAgentPlanStep(state)
+		if (!step) return
+		const planLines = state.plan.steps.map((planStep, index) => {
+			const status = state.completedStepIds.has(planStep.id)
+				? 'complete'
+				: state.blockedStepIds.has(planStep.id)
+					? 'blocked'
+					: planStep.id === state.currentStepId
+						? 'current'
+						: planStep.status
+			return `${index + 1}. [${status}] ${planStep.title}: ${planStep.description ?? ''}`
+		})
+		this._addUserCheckpoint({ threadId })
+		this._addMessageToThread(threadId, {
+			role: 'user',
+			content: [
+				'[Internal agent execution directive]',
+				`Reason: ${reason}`,
+				`Goal: ${state.plan.goal}`,
+				'Execution plan:',
+				...planLines,
+				`Current step: ${step.title}`,
+				'Continue autonomously through this plan. Use tools when they help the current step. Do not ask whether to continue. Stop only when the plan is complete, blocked, or awaiting permission.',
+			].join('\n'),
+			displayContent: '',
+			selections: null,
+			state: defaultMessageState,
+		})
+	}
+
+	private _advanceAgentPlanAfterAssistantText(threadId: string, text: string): boolean {
+		const state = this._getAgentPlanState(threadId)
+		if (!state || this._isAgentPlanComplete(state)) return false
+		if (this._assistantTextLooksBlocked(text)) {
+			this._blockCurrentAgentPlanStep(threadId, state, 'The assistant indicated it is blocked or needs user input.')
+			return false
+		}
+		if (this._assistantTextLooksComplete(text)) {
+			this._completeAgentPlanThrough(threadId, state, AGENT_PLAN_STEP_IDS.verify)
+			return false
+		}
+		const currentStep = this._currentAgentPlanStep(state)
+		if (!currentStep) return false
+		this._completeAgentPlanStep(threadId, state, currentStep.id)
+		if (this._isAgentPlanComplete(state)) return false
+		if (state.autoContinuations >= MAX_AGENT_PLAN_AUTO_CONTINUATIONS) {
+			this._blockCurrentAgentPlanStep(threadId, state, `Stopped after ${MAX_AGENT_PLAN_AUTO_CONTINUATIONS} automatic plan continuations.`)
+			return false
+		}
+		state.autoContinuations += 1
+		this._addInternalAgentPlanMessage(threadId, state, 'Advance to the next plan step.')
+		return true
 	}
 
 	private _canAutoApprovePermissionDecision(decision: PermissionDecision): boolean {
@@ -996,14 +1236,17 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 	private _runReadonlyToolBatch = async (
 		threadId: string,
 		toolCalls: RawToolCallObj[],
-	): Promise<{ interrupted?: boolean }> => {
+	): Promise<{ interrupted?: boolean, successfulToolNames: string[] }> => {
 		const results = await Promise.all(toolCalls.map(toolCall => (
 			this._runToolCall(threadId, toolCall.name, toolCall.id, undefined, {
 				preapproved: false,
 				unvalidatedToolParams: toolCall.rawParams,
 			})
 		)))
-		return { interrupted: results.some(result => result.interrupted) }
+		return {
+			interrupted: results.some(result => result.interrupted),
+			successfulToolNames: results.map(result => result.successfulToolName).filter((name): name is string => !!name),
+		}
 	}
 
 	private _startReadonlyToolCallEarly = (threadId: string, toolCall: RawToolCallObj): EarlyReadonlyToolRun => {
@@ -1067,7 +1310,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 	private _runWriteToolBatch = async (
 		threadId: string,
 		toolCalls: RawToolCallObj[],
-	): Promise<{ interrupted?: boolean, awaitingUserApproval?: boolean }> => {
+	): Promise<{ interrupted?: boolean, awaitingUserApproval?: boolean, successfulToolNames: string[] }> => {
 		const results = await Promise.all(toolCalls.map(toolCall => (
 			this._runToolCall(threadId, toolCall.name, toolCall.id, undefined, {
 				preapproved: false,
@@ -1077,6 +1320,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 		return {
 			interrupted: results.some(result => result.interrupted),
 			awaitingUserApproval: results.some(result => result.awaitingUserApproval),
+			successfulToolNames: results.map(result => result.successfulToolName).filter((name): name is string => !!name),
 		}
 	}
 
@@ -1084,18 +1328,22 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 		threadId: string,
 		toolCalls: RawToolCallObj[],
 		earlyRuns: Map<string, EarlyReadonlyToolRun>,
-	): Promise<{ interrupted?: boolean, awaitingUserApproval?: boolean, shouldSendAnotherMessage?: boolean }> => {
+	): Promise<{ interrupted?: boolean, awaitingUserApproval?: boolean, shouldSendAnotherMessage?: boolean, successfulToolNames?: string[] }> => {
 		const mcpTools = this._mcpService.getMCPTools()
 		const useReadonlyBatch = this._settingsService.state.globalSettings.parallelReadonlyTools
 		const useWriteBatch = this._settingsService.state.globalSettings.parallelWriteTools && !!this._settingsService.state.globalSettings.autoApprove.edits
 		let shouldSendAnotherMessage = false
+		const successfulToolNames: string[] = []
 
 		for (let i = 0; i < toolCalls.length;) {
 			const earlyRun = earlyRuns.get(toolCalls[i].id)
 			if (earlyRun) {
 				const toolMessage = await earlyRun.promise
 				this._addMessageToThread(threadId, toolMessage)
-				if (toolMessage.type === 'success') shouldSendAnotherMessage = true
+				if (toolMessage.type === 'success') {
+					shouldSendAnotherMessage = true
+					successfulToolNames.push(toolMessage.name)
+				}
 				i += 1
 				continue
 			}
@@ -1107,8 +1355,9 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 					if (earlyRuns.has(toolCall.id) || !this._canRunInReadonlyBatch(toolCall.name)) break
 					batch.push(toolCall)
 				}
-				const { interrupted } = await this._runReadonlyToolBatch(threadId, batch)
+				const { interrupted, successfulToolNames: batchSuccessfulToolNames } = await this._runReadonlyToolBatch(threadId, batch)
 				if (interrupted) return { interrupted: true }
+				successfulToolNames.push(...batchSuccessfulToolNames)
 				shouldSendAnotherMessage = true
 				i += batch.length
 				continue
@@ -1121,9 +1370,10 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 					if (!this._canRunInWriteBatch(toolCall.name)) break
 					batch.push(toolCall)
 				}
-				const { awaitingUserApproval, interrupted } = await this._runWriteToolBatch(threadId, batch)
+				const { awaitingUserApproval, interrupted, successfulToolNames: batchSuccessfulToolNames } = await this._runWriteToolBatch(threadId, batch)
 				if (interrupted) return { interrupted: true }
 				if (awaitingUserApproval) return { awaitingUserApproval: true }
+				successfulToolNames.push(...batchSuccessfulToolNames)
 				shouldSendAnotherMessage = true
 				i += batch.length
 				continue
@@ -1131,14 +1381,15 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 
 			const toolCall = toolCalls[i]
 			const mcpTool = mcpTools?.find(t => t.name === toolCall.name)
-			const { awaitingUserApproval, interrupted } = await this._runToolCall(threadId, toolCall.name, toolCall.id, mcpTool?.mcpServerName, { preapproved: false, unvalidatedToolParams: toolCall.rawParams })
+			const { awaitingUserApproval, interrupted, successfulToolName } = await this._runToolCall(threadId, toolCall.name, toolCall.id, mcpTool?.mcpServerName, { preapproved: false, unvalidatedToolParams: toolCall.rawParams })
 			if (interrupted) return { interrupted: true }
 			if (awaitingUserApproval) return { awaitingUserApproval: true }
+			if (successfulToolName) successfulToolNames.push(successfulToolName)
 			shouldSendAnotherMessage = true
 			i += 1
 		}
 
-		return { shouldSendAnotherMessage }
+		return { shouldSendAnotherMessage, successfulToolNames }
 	}
 
 
@@ -1149,7 +1400,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 		toolId: string,
 		mcpServerName: string | undefined,
 		opts: { preapproved: true, unvalidatedToolParams: RawToolParamsObj, validatedParams: ToolCallParams<ToolName> } | { preapproved: false, unvalidatedToolParams: RawToolParamsObj },
-	): Promise<{ awaitingUserApproval?: boolean, interrupted?: boolean }> => {
+	): Promise<ToolRunResult> => {
 
 		// compute these below
 		let toolParams: ToolCallParams<ToolName>
@@ -1333,7 +1584,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 			if (toolName === 'run_command' || toolName === 'run_tests' || toolName === 'install_dependencies' || toolName === 'run_persistent_command' || toolName === 'git_status' || toolName === 'git_diff' || toolName === 'git_apply_patch' || toolName === 'git_create_branch' || toolName === 'git_commit' || toolName === 'package_script_list' || toolName === 'review_snapshot' || toolName === 'git_worktree_create' || toolName === 'git_worktree_delete') {
 				await this._runAgentHookSafely({ event: 'after_run_command', toolCall: toolInvocation, toolResult: { ok: true, data: toolResult }, metadata: { threadId, toolId, toolName } })
 			}
-			return {}
+			return { successfulToolName: toolName }
 		};
 
 
@@ -1362,12 +1613,19 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 		const idleInterruptor = Promise.resolve(() => { interruptedWhenIdle = true })
 		// _runToolCall does not need setStreamState({idle}) before it, but it needs it after it. (handles its own setStreamState)
 
-		// above just defines helpers, below starts the actual function
-		const { chatMode } = this._settingsService.state.globalSettings // should not change as we loop even if user changes it, so it goes here
-		const { overridesOfModel } = this._settingsService.state
-		const promptContext = await this._convertToLLMMessagesService.prepareAgentRunPromptContext({
-			chatMode,
-			modelSelection,
+			// above just defines helpers, below starts the actual function
+			const { chatMode } = this._settingsService.state.globalSettings // should not change as we loop even if user changes it, so it goes here
+			const { overridesOfModel } = this._settingsService.state
+			const useCustomAgentPlanRuntime = chatMode === 'agent' && this._settingsService.state.globalSettings.disableSystemMessage
+			if (useCustomAgentPlanRuntime) {
+				const planState = this._ensureAgentPlanState(threadId)
+				if (!callThisToolFirst) {
+					this._addInternalAgentPlanMessage(threadId, planState, 'Begin the agent run.')
+				}
+			}
+			const promptContext = await this._convertToLLMMessagesService.prepareAgentRunPromptContext({
+				chatMode,
+				modelSelection,
 		})
 
 		let nMessagesSent = 0
@@ -1376,15 +1634,22 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 		const agentRunStartedAt = Date.now()
 		const elapsedMs = () => Date.now() - agentRunStartedAt
 
-		// before enter loop, call tool
-		if (callThisToolFirst) {
-			const { interrupted } = await this._runToolCall(threadId, callThisToolFirst.name, callThisToolFirst.id, callThisToolFirst.mcpServerName, { preapproved: true, unvalidatedToolParams: callThisToolFirst.rawParams, validatedParams: callThisToolFirst.params })
-			if (interrupted) {
-				this._setStreamState(threadId, undefined)
-				this._addUserCheckpoint({ threadId })
-				return
+			// before enter loop, call tool
+			if (callThisToolFirst) {
+				const { interrupted, successfulToolName } = await this._runToolCall(threadId, callThisToolFirst.name, callThisToolFirst.id, callThisToolFirst.mcpServerName, { preapproved: true, unvalidatedToolParams: callThisToolFirst.rawParams, validatedParams: callThisToolFirst.params })
+				if (interrupted) {
+					this._setStreamState(threadId, undefined)
+					this._addUserCheckpoint({ threadId })
+					return
+				}
+				if (useCustomAgentPlanRuntime) {
+					if (successfulToolName) this._advanceAgentPlanAfterTools(threadId, [successfulToolName])
+					const currentPlanState = this._getAgentPlanState(threadId)
+					if (currentPlanState && !this._isAgentPlanComplete(currentPlanState)) {
+						this._addInternalAgentPlanMessage(threadId, currentPlanState, 'Continue after the approved tool result.')
+					}
+				}
 			}
-		}
 		this._setStreamState(threadId, { isRunning: 'idle', interrupt: 'not_needed' })  // just decorative, for clarity
 
 
@@ -1589,18 +1854,30 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 
 				// call tool if there is one
 				if (toolCalls && toolCalls.length > 0) {
-					const { awaitingUserApproval, interrupted, shouldSendAnotherMessage: shouldContinue } = await this._runToolCallsInOrder(threadId, toolCalls, earlyReadonlyToolRuns)
+					const { awaitingUserApproval, interrupted, shouldSendAnotherMessage: shouldContinue, successfulToolNames } = await this._runToolCallsInOrder(threadId, toolCalls, earlyReadonlyToolRuns)
 					if (interrupted) {
 						this._setStreamState(threadId, undefined)
 						return
 					}
-					if (awaitingUserApproval) { isRunningWhenEnd = 'awaiting_user' }
-					else { shouldSendAnotherMessage = !!shouldContinue }
+						if (awaitingUserApproval) { isRunningWhenEnd = 'awaiting_user' }
+						else {
+							if (useCustomAgentPlanRuntime) {
+								this._advanceAgentPlanAfterTools(threadId, successfulToolNames ?? [])
+								const currentPlanState = this._getAgentPlanState(threadId)
+								if (currentPlanState && shouldContinue && !this._isAgentPlanComplete(currentPlanState)) {
+									this._addInternalAgentPlanMessage(threadId, currentPlanState, 'Continue after tool result.')
+								}
+							}
+							shouldSendAnotherMessage = !!shouldContinue
+						}
 
 					this._setStreamState(threadId, { isRunning: 'idle', interrupt: 'not_needed' }) // just decorative, for clarity
 				}
 				else {
 					this._interruptEarlyReadonlyToolCalls(earlyReadonlyToolRuns)
+					if (useCustomAgentPlanRuntime) {
+						shouldSendAnotherMessage = this._advanceAgentPlanAfterAssistantText(threadId, info.fullText)
+					}
 				}
 
 			} // end while (attempts)

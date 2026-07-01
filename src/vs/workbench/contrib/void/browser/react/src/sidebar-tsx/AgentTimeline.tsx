@@ -21,6 +21,10 @@ type CandidatePatch = {
 
 const eventTitle = (event: AgentEvent) => {
 	if (event.type === 'run.started') return 'Run started'
+	if (event.type === 'plan.created') return 'Plan created'
+	if (event.type === 'plan.step.started') return `Started ${event.step.title}`
+	if (event.type === 'plan.step.completed') return `Completed ${event.step.title}`
+	if (event.type === 'plan.step.blocked') return `Blocked ${event.step.title}`
 	if (event.type === 'model.delta') return 'Model'
 	if (event.type === 'tool.requested') return `Requested ${event.call.name}`
 	if (event.type === 'permission.required') return 'Permission required'
@@ -36,6 +40,9 @@ const eventTitle = (event: AgentEvent) => {
 
 const eventDetail = (event: AgentEvent) => {
 	if (event.type === 'run.started') return event.goal
+	if (event.type === 'plan.created') return event.plan.steps.map((step, i) => `${i + 1}. ${step.title}`).join('\n')
+	if (event.type === 'plan.step.started' || event.type === 'plan.step.completed') return event.step.description ?? ''
+	if (event.type === 'plan.step.blocked') return event.reason
 	if (event.type === 'model.delta') return event.text.trim()
 	if (event.type === 'tool.requested') return safeStringify(event.call.input)
 	if (event.type === 'permission.required' || event.type === 'permission.resolved') {

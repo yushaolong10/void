@@ -1,4 +1,5 @@
 import { URI } from '../../../../../../base/common/uri.js';
+import { ExecutionPlan, ExecutionPlanStep } from '../execution/ExecutionPlan.js';
 import { ToolInvocation } from '../tools/ToolInvocation.js';
 import { ToolResult } from '../tools/ToolResult.js';
 import { PermissionDecision } from '../permissions/PermissionDecision.js';
@@ -6,6 +7,10 @@ import { AgentRunId, AgentSessionId } from './AgentState.js';
 
 export type AgentEvent =
 	| { type: 'run.started'; sessionId: AgentSessionId; runId: AgentRunId; goal: string; startedAt: number }
+	| { type: 'plan.created'; sessionId: AgentSessionId; runId: AgentRunId; plan: ExecutionPlan; createdAt: number }
+	| { type: 'plan.step.started'; sessionId: AgentSessionId; runId: AgentRunId; step: ExecutionPlanStep; startedAt: number }
+	| { type: 'plan.step.completed'; sessionId: AgentSessionId; runId: AgentRunId; step: ExecutionPlanStep; completedAt: number }
+	| { type: 'plan.step.blocked'; sessionId: AgentSessionId; runId: AgentRunId; step: ExecutionPlanStep; reason: string; blockedAt: number }
 	| { type: 'model.delta'; sessionId: AgentSessionId; runId: AgentRunId; text: string }
 	| { type: 'tool.requested'; sessionId: AgentSessionId; runId: AgentRunId; call: ToolInvocation }
 	| { type: 'permission.required'; sessionId: AgentSessionId; runId: AgentRunId; decision: PermissionDecision }

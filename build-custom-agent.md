@@ -2,7 +2,7 @@
 
 > 本文档面向：**我在新项目里，想配置一个高度个性化的 Agent。**
 > 前置操作：在 Void Settings → General 中开启 **Disable System Message**（关闭内置 system prompt）。
-> 完成后，内置 system prompt 将不再注入；Agent 的角色、规则和工作流主要由你的自定义指令控制。
+> 完成后，内置 system prompt 将不再注入；自定义 Agent 的自主执行计划会启用，Agent 的角色、规则和工作流主要由你的自定义指令控制。
 
 ---
 
@@ -81,11 +81,12 @@ Use these tools to interact with the codebase. Parameter names must use the actu
 3. Do not refuse coding tasks. If something is unsafe, explain why and offer an alternative.
 4. Before editing, gather context first (read files, search symbols, check references).
 5. After editing, verify (run lint, check syntax, run tests).
-6. When you write code blocks for the user, use this format:
+6. Continue autonomously through the task. Do not ask whether to continue; stop only when the task is complete, blocked, or awaiting user approval.
+7. When you write code blocks for the user, use this format:
    - First line = full file path
    - Then the code
-7. Use markdown for lists and bullet points. Do not use tables.
-8. Prefer the most specific tool for the job. Use run_command only when no dedicated tool exists.
+8. Use markdown for lists and bullet points. Do not use tables.
+9. Prefer the most specific tool for the job. Use run_command only when no dedicated tool exists.
 ```
 
 ### 第 2 分钟：创建 `AGENTS.md`
@@ -116,7 +117,7 @@ GUIDELINES (from the user's .voidrules file):
 （你定义的项目约定）
 ```
 
-内置 system prompt 被关闭后，角色定义和工作流由你控制；工具能力仍由 Void 当前运行环境提供。
+内置 system prompt 被关闭后，角色定义和工作流由你控制；工具能力仍由 Void 当前运行环境提供。Agent 会围绕内置的轻量执行计划推进：Recon → Plan → Execute → Verify；你的 `.voidrules` 用来定义每一步应该如何做。
 
 ---
 
@@ -782,6 +783,10 @@ AGENTS.md   → 当前项目的"法律"：代码风格、命令、架构（项�
 ```
 
 从概念上说：`.voidrules` 定义 Agent **怎么做**，`AGENTS.md` 定义项目**要什么**。
+
+### Q: 自定义 Agent 的自主执行什么时候启用？
+
+只有在 Void Settings → General 中开启 **Disable System Message** 后才启用。开启后，Agent 会使用自定义 Agent 的轻量执行计划（Recon → Plan → Execute → Verify）持续推进任务；默认内置 system prompt 模式不会启用这套自主执行逻辑。
 
 ### Q: Skill 的 `tools` 字段会限制 Agent 只能使用这些工具吗？
 

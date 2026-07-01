@@ -1417,7 +1417,7 @@ max-w-none
 		{children}
 	</div>
 }
-const AssistantMessageComponent = ({ chatMessage, isCheckpointGhost, isCommitted, messageIdx }: { chatMessage: ChatMessage & { role: 'assistant' }, isCheckpointGhost: boolean, messageIdx: number, isCommitted: boolean }) => {
+const AssistantMessageComponent = ({ chatMessage, isCheckpointGhost, isCommitted, isProcessing, messageIdx }: { chatMessage: ChatMessage & { role: 'assistant' }, isCheckpointGhost: boolean, messageIdx: number, isCommitted: boolean, isProcessing: boolean }) => {
 
 	const accessor = useAccessor()
 	const chatThreadsService = accessor.get('IChatThreadService')
@@ -1468,7 +1468,7 @@ const AssistantMessageComponent = ({ chatMessage, isCheckpointGhost, isCommitted
 		}
 		{isCommitted && chatMessage.elapsedMs !== undefined ?
 			<div className={`${isCheckpointGhost ? 'opacity-50' : ''} px-2 text-xs text-void-fg-4 opacity-80 select-none`}>
-				执行完成 {formatElapsed(chatMessage.elapsedMs)}
+				{isProcessing ? '处理中' : '执行完成'} {formatElapsed(chatMessage.elapsedMs)}
 			</div>
 			: null}
 	</>
@@ -2807,6 +2807,7 @@ type ChatBubbleProps = {
 	messageIdx: number,
 	isCommitted: boolean,
 	chatIsRunning: IsRunningType,
+	isProcessingAssistant?: boolean,
 	threadId: string,
 	currCheckpointIdx: number | undefined,
 	_scrollToBottom: (() => void) | null,
@@ -2818,7 +2819,7 @@ const ChatBubble = (props: ChatBubbleProps) => {
 	</ErrorBoundary>
 }
 
-const _ChatBubble = ({ threadId, chatMessage, currCheckpointIdx, isCommitted, messageIdx, chatIsRunning, _scrollToBottom }: ChatBubbleProps) => {
+const _ChatBubble = ({ threadId, chatMessage, currCheckpointIdx, isCommitted, messageIdx, chatIsRunning, isProcessingAssistant, _scrollToBottom }: ChatBubbleProps) => {
 	const role = chatMessage.role
 
 	const isCheckpointGhost = messageIdx > (currCheckpointIdx ?? Infinity) && !chatIsRunning // whether to show as gray (if chat is running, for good measure just dont show any ghosts)
@@ -2838,6 +2839,7 @@ const _ChatBubble = ({ threadId, chatMessage, currCheckpointIdx, isCommitted, me
 			isCheckpointGhost={isCheckpointGhost}
 			messageIdx={messageIdx}
 			isCommitted={isCommitted}
+			isProcessing={!!isProcessingAssistant}
 		/>
 	}
 	else if (role === 'aborted_assistant') {
@@ -3409,6 +3411,12 @@ export const SidebarChat = () => {
 		return visibleMessages.map((message, i) => {
 			// original index = i + (hiddenMessageCount > 0 ? hiddenMessageCount : 0)
 			const originalIdx = i + (previousMessages.length - visibleMessages.length)
+			const nextUserIdx = previousMessages.findIndex((candidate, candidateIdx) => candidateIdx > originalIdx && candidate.role === 'user')
+			const turnEndIdx = nextUserIdx === -1 ? previousMessages.length : nextUserIdx
+			const hasLaterAssistantInTurn = previousMessages.some((candidate, candidateIdx) =>
+				candidateIdx > originalIdx && candidateIdx < turnEndIdx && candidate.role === 'assistant'
+			)
+			const isCurrentTurn = nextUserIdx === -1
 			return <ChatBubble
 				key={originalIdx}
 				currCheckpointIdx={currCheckpointIdx}
@@ -3416,6 +3424,7 @@ export const SidebarChat = () => {
 				messageIdx={originalIdx}
 				isCommitted={true}
 				chatIsRunning={isRunning}
+				isProcessingAssistant={message.role === 'assistant' && (hasLaterAssistantInTurn || (!!isRunning && isCurrentTurn))}
 				threadId={threadId}
 				_scrollToBottom={() => scrollToBottom(scrollContainerRef)}
 			/>
