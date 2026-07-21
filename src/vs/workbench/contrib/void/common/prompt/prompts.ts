@@ -526,14 +526,14 @@ export const availableTools = (chatMode: ChatMode | null, mcpTools: InternalTool
 		: [
 			...effectiveBuiltinTools ?? [],
 			...effectiveMCPTools ?? [],
-		]
+		].sort((a, b) => a.name.localeCompare(b.name))
 
 	return tools
 }
 
 const toolCallDefinitionsXMLString = (tools: InternalToolInfo[]) => {
 	return `${tools.map((t, i) => {
-		const params = Object.keys(t.params).map(paramName => `<${paramName}>${t.params[paramName].description}</${paramName}>`).join('\n')
+		const params = Object.keys(t.params).sort().map(paramName => `<${paramName}>${t.params[paramName].description}</${paramName}>`).join('\n')
 		return `\
     ${i + 1}. ${t.name}
     Description: ${t.description}
@@ -673,6 +673,7 @@ ${FINAL}
 
 // ======================================================== chat (normal, gather, agent) ========================================================
 
+export const PROMPT_CACHE_BREAKPOINT = '<!-- VOID_PROMPT_CACHE_BREAKPOINT -->'
 
 export const chat_systemMessage = ({ workspaceFolders, openedURIs, activeURI, persistentTerminalIDs, directoryStr, chatMode: mode, mcpTools, includeXMLToolDefinitions, supportsVision }: { workspaceFolders: string[], directoryStr: string, openedURIs: string[], activeURI: string | undefined, persistentTerminalIDs: string[], chatMode: ChatMode, mcpTools: InternalToolInfo[] | undefined, includeXMLToolDefinitions: boolean, supportsVision?: boolean }) => {
 	const stableHeaderBlock = (`You are a senior software engineering ${mode === 'agent' ? 'agent' : 'assistant'} operating inside the user's codebase.
@@ -792,6 +793,9 @@ ${details.map((d, i) => `${i + 1}. ${d}`).join('\n\n')}`)
 	ansStrs.push(stableHeaderBlock)
 	if (toolDefinitions) ansStrs.push(toolDefinitions)
 	ansStrs.push(stablePolicyBlock)
+	// Provider adapters use this boundary to cache stable policy/tool content while
+	// leaving workspace and editor state outside the explicit cache block.
+	ansStrs.push(PROMPT_CACHE_BREAKPOINT)
 	ansStrs.push(semiStableWorkspaceBlock)
 	ansStrs.push(volatileRuntimeBlock)
 
@@ -812,14 +816,22 @@ ${details.map((d, i) => `${i + 1}. ${d}`).join('\n\n')}`)
 // }
 
 export const CHAT_HISTORY_COMPRESSION = {
-	maxFullRounds: 5,
-	roundsPerSummaryChunk: 5,
 	maxSummaryChars: 5000,
 } as const
 
 export const COMPRESSING_HISTORY_LABEL = 'Compressing earlier history...'
 
-export const compressHistoryPrompt = `You are a conversation compression assistant. Summarize the following chat history into a compact, information-dense paragraph. Focus on: key user requests, actions taken by the assistant (file reads, edits, command results), decisions made, and important findings. Preserve file paths and function names when they are critical. Keep the original language of the conversation. Output ONLY the summary, no explanations, no formatting.`
+export const compressHistoryPrompt = `You are a conversation compression assistant. Produce a compact, factual memory that lets another coding agent continue without rereading the original turns.
+Preserve confirmed user goals, constraints, decisions, changed files and symbols, exact failures, verification results, unresolved work, and artifact/file references. Tool results below have already been reduced; do not discard their concrete findings. Never turn an inference into a confirmed fact. Keep the original language of the conversation.
+Use exactly these short sections and omit empty sections:
+Goal:
+Constraints:
+Decisions:
+Changes:
+Observations:
+Verification:
+Unresolved:
+Output only the memory.`
 
 export const DEFAULT_FILE_SIZE_LIMIT = 2_000_000
 

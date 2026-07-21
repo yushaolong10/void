@@ -18,7 +18,7 @@ import { AnthropicLLMChatMessage, GeminiLLMChatMessage, LLMChatMessage, LLMFIMMe
 import { ChatMode, displayInfoOfProviderName, isOpenAICompatibleProviderName, ModelSelectionOptions, OverridesOfModel, ProviderName, SettingsOfProvider } from '../../common/voidSettingsTypes.js';
 import { getSendableReasoningInfo, getModelCapabilities, getProviderCapabilities, defaultProviderSettings, getReservedOutputTokenSpace } from '../../common/modelCapabilities.js';
 import { extractReasoningWrapper, extractXMLToolsWrapper } from './extractGrammar.js';
-import { availableTools, InternalToolInfo } from '../../common/prompt/prompts.js';
+import { availableTools, InternalToolInfo, PROMPT_CACHE_BREAKPOINT } from '../../common/prompt/prompts.js';
 import { generateUuid } from '../../../../../base/common/uuid.js';
 
 const getGoogleApiKey = async () => {
@@ -259,7 +259,7 @@ const toOpenAICompatibleTool = (toolInfo: InternalToolInfo) => {
 	const { name, description, params } = toolInfo
 
 	const paramsWithType: { [s: string]: { description: string; type: 'string' } } = {}
-	for (const key in params) { paramsWithType[key] = { ...params[key], type: 'string' } }
+	for (const [key, value] of Object.entries(params).sort(([a], [b]) => a.localeCompare(b))) { paramsWithType[key] = { ...value, type: 'string' } }
 
 	return {
 		type: 'function',
@@ -282,8 +282,8 @@ const openAITools = (chatMode: ChatMode | null, mcpTools: InternalToolInfo[] | u
 	if (!allowedTools || Object.keys(allowedTools).length === 0) return null
 
 	const openAITools: OpenAI.Chat.Completions.ChatCompletionTool[] = []
-	for (const t in allowedTools ?? {}) {
-		openAITools.push(toOpenAICompatibleTool(allowedTools[t]))
+	for (const tool of [...allowedTools].sort((a, b) => a.name.localeCompare(b.name))) {
+		openAITools.push(toOpenAICompatibleTool(tool))
 	}
 	return openAITools
 }
@@ -387,6 +387,7 @@ const _sendOpenAICompatibleChat = async ({ messages, onText, onFinalMessage, onE
 		model: modelName,
 		messages: messages as any,
 		stream: true,
+		...(providerName === 'openAI' ? { stream_options: { include_usage: true } } : {}),
 		...nativeToolsObj,
 		...additionalOpenAIPayload
 		// max_completion_tokens: maxTokens,
@@ -410,6 +411,7 @@ const _sendOpenAICompatibleChat = async ({ messages, onText, onFinalMessage, onE
 
 	let fullReasoningSoFar = ''
 	let fullTextSoFar = ''
+	let finalUsage: OpenAI.Completions.CompletionUsage | undefined
 
 	const toolCallsByIndex = new Map<number, StreamingOpenAIToolCall>()
 
@@ -428,6 +430,7 @@ const _sendOpenAICompatibleChat = async ({ messages, onText, onFinalMessage, onE
 				// when receive text
 				for await (const chunk of response) {
 					watchdog.bump()
+					if (chunk.usage) finalUsage = chunk.usage
 					// message
 					const newText = chunk.choices[0]?.delta?.content ?? ''
 					fullTextSoFar += newText
@@ -468,7 +471,18 @@ const _sendOpenAICompatibleChat = async ({ messages, onText, onFinalMessage, onE
 				else {
 					const toolCalls = rawToolCallsOfOpenAIToolCalls(toolCallsByIndex)
 					const toolCallObj = toolCalls.length > 0 ? { toolCall: toolCalls[0], toolCalls } : {}
-					onFinalMessage({ fullText: fullTextSoFar, fullReasoning: fullReasoningSoFar, anthropicReasoning: null, ...toolCallObj });
+					onFinalMessage({
+						fullText: fullTextSoFar,
+						fullReasoning: fullReasoningSoFar,
+						anthropicReasoning: null,
+						usage: finalUsage ? {
+							inputTokens: finalUsage.prompt_tokens,
+							outputTokens: finalUsage.completion_tokens,
+							reasoningTokens: finalUsage.completion_tokens_details?.reasoning_tokens,
+							cacheReadTokens: finalUsage.prompt_tokens_details?.cached_tokens,
+						} : undefined,
+						...toolCallObj,
+					});
 				}
 			} finally {
 				watchdog.clear()
@@ -524,7 +538,7 @@ const _openaiCompatibleList = async ({ onSuccess: onSuccess_, onError: onError_,
 const toAnthropicTool = (toolInfo: InternalToolInfo) => {
 	const { name, description, params } = toolInfo
 	const paramsWithType: { [s: string]: { description: string; type: 'string' } } = {}
-	for (const key in params) { paramsWithType[key] = { ...params[key], type: 'string' } }
+	for (const [key, value] of Object.entries(params).sort(([a], [b]) => a.localeCompare(b))) { paramsWithType[key] = { ...value, type: 'string' } }
 	return {
 		name: name,
 		description: description,
@@ -541,8 +555,8 @@ const anthropicTools = (chatMode: ChatMode | null, mcpTools: InternalToolInfo[] 
 	if (!allowedTools || Object.keys(allowedTools).length === 0) return null
 
 	const anthropicTools: Anthropic.Messages.ToolUnion[] = []
-	for (const t in allowedTools ?? {}) {
-		anthropicTools.push(toAnthropicTool(allowedTools[t]))
+	for (const tool of [...allowedTools].sort((a, b) => a.name.localeCompare(b.name))) {
+		anthropicTools.push(toAnthropicTool(tool))
 	}
 	return anthropicTools
 }
@@ -580,8 +594,17 @@ const sendAnthropicChat = async ({ messages, providerName, onText, onFinalMessag
 		dangerouslyAllowBrowser: true
 	});
 
+	const systemBlocks = separateSystemMessage
+		? separateSystemMessage.split(PROMPT_CACHE_BREAKPOINT).map((text, index, parts) => ({
+			type: 'text' as const,
+			text: text.trim(),
+			...(index === 0 || (parts.length === 1 && index === parts.length - 1)
+				? { cache_control: { type: 'ephemeral' as const } }
+				: {}),
+		})).filter(block => !!block.text)
+		: undefined
 	const stream = anthropic.messages.stream({
-		system: separateSystemMessage ?? undefined,
+		system: systemBlocks,
 		messages: messages as AnthropicLLMChatMessage[],
 		model: modelName,
 		max_tokens: maxTokens ?? 4_096, // anthropic requires this
@@ -675,7 +698,18 @@ const sendAnthropicChat = async ({ messages, providerName, onText, onFinalMessag
 			.filter((toolCall): toolCall is RawToolCallObj => !!toolCall)
 		const toolCallObj = toolCalls.length > 0 ? { toolCall: toolCalls[0], toolCalls } : {}
 
-		onFinalMessage({ fullText, fullReasoning, anthropicReasoning, ...toolCallObj })
+		onFinalMessage({
+			fullText,
+			fullReasoning,
+			anthropicReasoning,
+			usage: {
+				inputTokens: response.usage.input_tokens,
+				outputTokens: response.usage.output_tokens,
+				cacheReadTokens: response.usage.cache_read_input_tokens ?? undefined,
+				cacheWriteTokens: response.usage.cache_creation_input_tokens ?? undefined,
+			},
+			...toolCallObj,
+		})
 	})
 	// on error
 	stream.on('error', (error) => {
@@ -813,8 +847,8 @@ const geminiTools = (chatMode: ChatMode | null, mcpTools: InternalToolInfo[] | u
 	const allowedTools = availableTools(chatMode, mcpTools, options)
 	if (!allowedTools || Object.keys(allowedTools).length === 0) return null
 	const functionDecls: FunctionDeclaration[] = []
-	for (const t in allowedTools ?? {}) {
-		functionDecls.push(toGeminiFunctionDecl(allowedTools[t]))
+	for (const tool of [...allowedTools].sort((a, b) => a.name.localeCompare(b.name))) {
+		functionDecls.push(toGeminiFunctionDecl(tool))
 	}
 	const tools: GeminiTool = { functionDeclarations: functionDecls, }
 	return [tools]
@@ -882,6 +916,7 @@ const sendGeminiChat = async ({
 	// when receive text
 	let fullReasoningSoFar = ''
 	let fullTextSoFar = ''
+	let finalUsageMetadata: { promptTokenCount?: number; candidatesTokenCount?: number; cachedContentTokenCount?: number } | undefined
 
 	let toolName = ''
 	let toolParamsStr = ''
@@ -910,6 +945,7 @@ const sendGeminiChat = async ({
 				// Process the stream
 				for await (const chunk of stream) {
 					watchdog.bump()
+					if (chunk.usageMetadata) finalUsageMetadata = chunk.usageMetadata
 					// message
 					const newText = chunk.text ?? ''
 					fullTextSoFar += newText
@@ -940,7 +976,17 @@ const sendGeminiChat = async ({
 					if (!toolId) toolId = generateUuid() // ids are empty, but other providers might expect an id
 					const toolCall = rawToolCallObjOfParamsStr(toolName, toolParamsStr, toolId)
 					const toolCallObj = toolCall ? { toolCall } : {}
-					onFinalMessage({ fullText: fullTextSoFar, fullReasoning: fullReasoningSoFar, anthropicReasoning: null, ...toolCallObj });
+					onFinalMessage({
+						fullText: fullTextSoFar,
+						fullReasoning: fullReasoningSoFar,
+						anthropicReasoning: null,
+						usage: finalUsageMetadata ? {
+							inputTokens: finalUsageMetadata.promptTokenCount,
+							outputTokens: finalUsageMetadata.candidatesTokenCount,
+							cacheReadTokens: finalUsageMetadata.cachedContentTokenCount,
+						} : undefined,
+						...toolCallObj,
+					});
 				}
 			} finally {
 				watchdog.clear()

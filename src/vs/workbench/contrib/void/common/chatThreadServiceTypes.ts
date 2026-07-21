@@ -59,8 +59,26 @@ export type ImageAttachment = {
 	disabledReason?: string;
 }
 
+export type ChatMessageOrigin =
+	| 'external-user'
+	| 'assistant'
+	| 'tool'
+	| 'internal-plan'
+	| 'runtime-context';
+
+export type ChatMessageContextMetadata = {
+	/** Stable identity used by persisted context summaries. Optional for legacy messages. */
+	id: string;
+	origin: ChatMessageOrigin;
+	/** Only external user messages start a conversation round. */
+	startsRound?: boolean;
+	/** Pinned messages must remain in the verbatim working set. */
+	pinned?: boolean;
+	phaseId?: string;
+};
+
 // WARNING: changing this format is a big deal!!!!!! need to migrate old format to new format on users' computers so people don't get errors.
-export type ChatMessage =
+export type ChatMessage = (
 	| {
 		role: 'user';
 		content: string; // content displayed to the LLM on future calls - allowed to be '', will be replaced with (empty)
@@ -90,6 +108,10 @@ export type ChatMessage =
 	| ToolMessage<ToolName>
 	| DecorativeCanceledTool
 	| CheckpointEntry
+) & {
+	/** Added as an optional field so persisted threads from older versions remain valid. */
+	contextMeta?: ChatMessageContextMetadata;
+}
 
 
 // one of the square items that indicates a selection in a chat bubble

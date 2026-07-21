@@ -11,7 +11,7 @@ import { IStorageService, StorageScope, StorageTarget } from '../../../../platfo
 import { URI } from '../../../../base/common/uri.js';
 import { Emitter, Event } from '../../../../base/common/event.js';
 import { ILLMMessageService, MODEL_DOES_NOT_SUPPORT_IMAGE_INPUT_ERROR } from '../common/sendLLMMessageService.js';
-import { CHAT_HISTORY_COMPRESSION, chat_userMessageContent, isABuiltinToolName } from '../common/prompt/prompts.js';
+import { chat_userMessageContent, isABuiltinToolName } from '../common/prompt/prompts.js';
 import { AnthropicReasoning, getErrorMessage, RawToolCallObj, RawToolParamsObj } from '../common/sendLLMMessageTypes.js';
 import { generateUuid } from '../../../../base/common/uuid.js';
 import { FeatureName, ModelSelection, ModelSelectionOptions } from '../common/voidSettingsTypes.js';
@@ -1082,6 +1082,11 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 		this._addUserCheckpoint({ threadId })
 		this._addMessageToThread(threadId, {
 			role: 'user',
+			contextMeta: {
+				id: generateUuid(),
+				origin: 'internal-plan',
+				startsRound: false,
+			},
 			content: [
 				'[Internal agent execution directive]',
 				`Reason: ${reason}`,
@@ -1668,26 +1673,13 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 
 			const chatMessages = this.state.allThreads[threadId]?.messages ?? []
 
-			// Check if we need history compression (enough rounds to freeze at least one chunk)
-			let compressionNeeded = false
-			if (chatMode === 'agent') {
-				let userCount = 0
-				for (const m of chatMessages) {
-					if (m.role === 'user') userCount++
-				}
-				compressionNeeded = userCount >= CHAT_HISTORY_COMPRESSION.maxFullRounds + CHAT_HISTORY_COMPRESSION.roundsPerSummaryChunk
-			}
-
-			if (compressionNeeded) {
-				this._setStreamState(threadId, { isRunning: 'compressing' })
-			}
-
 			const { messages, separateSystemMessage } = await this._convertToLLMMessagesService.prepareLLMChatMessages({
 				chatMessages,
 				modelSelection,
 				chatMode,
 				promptContextOverride: promptContext,
 				threadId,
+				onWillCompress: () => this._setStreamState(threadId, { isRunning: 'compressing' }),
 			})
 
 			// Check if compression was aborted by the user during the call
@@ -2688,6 +2680,20 @@ We only need to do it for files that were edited since `from`, ie files between 
 		const oldThread = allThreads[threadId]
 		if (!oldThread) return // should never happen
 		// update state and store it
+		const messageWithContext = message.contextMeta ? message : {
+			...message,
+			contextMeta: {
+				id: generateUuid(),
+				origin: message.role === 'user'
+					? 'external-user' as const
+					: message.role === 'assistant' || message.role === 'aborted_assistant'
+						? 'assistant' as const
+						: message.role === 'tool'
+							? 'tool' as const
+							: 'runtime-context' as const,
+				startsRound: message.role === 'user',
+			},
+		} as ChatMessage
 		const newThreads = {
 			...allThreads,
 			[oldThread.id]: {
@@ -2695,7 +2701,7 @@ We only need to do it for files that were edited since `from`, ie files between 
 				lastModified: new Date().toISOString(),
 				messages: [
 					...oldThread.messages,
-					message
+					messageWithContext
 				],
 			}
 		}

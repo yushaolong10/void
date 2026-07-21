@@ -105,8 +105,16 @@ export type RawToolCallBatch = RawToolCallObj[];
 
 export type AnthropicReasoning = ({ type: 'thinking'; thinking: any; signature: string; } | { type: 'redacted_thinking', data: any })
 
+export type LLMTokenUsage = {
+	inputTokens?: number;
+	outputTokens?: number;
+	reasoningTokens?: number;
+	cacheReadTokens?: number;
+	cacheWriteTokens?: number;
+}
+
 export type OnText = (p: { fullText: string; fullReasoning: string; toolCall?: RawToolCallObj; toolCalls?: RawToolCallBatch }) => void
-export type OnFinalMessage = (p: { fullText: string; fullReasoning: string; toolCall?: RawToolCallObj; toolCalls?: RawToolCallBatch; anthropicReasoning: AnthropicReasoning[] | null }) => void // id is tool_use_id
+export type OnFinalMessage = (p: { fullText: string; fullReasoning: string; toolCall?: RawToolCallObj; toolCalls?: RawToolCallBatch; anthropicReasoning: AnthropicReasoning[] | null; usage?: LLMTokenUsage }) => void // id is tool_use_id
 export type OnError = (p: { message: string; fullError: Error | null }) => void
 export type OnAbort = () => void
 export type AbortRef = { current: (() => void) | null }
@@ -223,4 +231,3 @@ export type MainModelListParams<modelResponse> = Omit<ModelListParams<modelRespo
 
 export type EventModelListOnSuccessParams<modelResponse> = Parameters<ModelListParams<modelResponse>['onSuccess']>[0] & { requestId: string }
 export type EventModelListOnErrorParams<modelResponse> = Parameters<ModelListParams<modelResponse>['onError']>[0] & { requestId: string }
-
