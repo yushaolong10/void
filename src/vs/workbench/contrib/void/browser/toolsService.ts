@@ -18,7 +18,7 @@ import { RawToolParamsObj } from '../common/sendLLMMessageTypes.js'
 import { MAX_CHILDREN_URIs_PAGE, MAX_FILE_CHARS_PAGE, MAX_TERMINAL_BG_COMMAND_TIME, MAX_TERMINAL_INACTIVE_TIME, MAX_TERMINAL_TOTAL_TIME } from '../common/prompt/prompts.js'
 import { IVoidSettingsService } from '../common/voidSettingsService.js'
 import { generateUuid } from '../../../../base/common/uuid.js'
-import { extractSearchReplaceBlocks } from '../common/helpers/extractCodeFromResult.js'
+import { extractSearchReplaceBlocks, normalizeSearchReplaceBlocks } from '../common/helpers/extractCodeFromResult.js'
 import { IBrowserAgentBridge, createLegacyToolInvocation } from './agent/BrowserAgentBridge.js'
 import { ToolRisk } from '../common/agent/tools/ToolDefinition.js'
 import { ReviewSnapshotManager } from '../common/agent/execution/ReviewSnapshotManager.js'
@@ -467,9 +467,13 @@ export class ToolsService implements IToolsService {
 				const { uri: uriStr, search_replace_blocks: searchReplaceBlocksSnakeCase, searchReplaceBlocks: searchReplaceBlocksCamelCase } = params
 				const searchReplaceBlocksUnknown = searchReplaceBlocksSnakeCase ?? searchReplaceBlocksCamelCase
 				const uri = validateURI(uriStr)
-				const searchReplaceBlocks = validateStr('searchReplaceBlocks', searchReplaceBlocksUnknown)
-				if (extractSearchReplaceBlocks(searchReplaceBlocks).length === 0) {
+				const searchReplaceBlocks = normalizeSearchReplaceBlocks(validateStr('searchReplaceBlocks', searchReplaceBlocksUnknown))
+				const blocks = extractSearchReplaceBlocks(searchReplaceBlocks)
+				if (blocks.length === 0) {
 					throw new Error(`Invalid LLM output format: searchReplaceBlocks must contain at least one valid SEARCH/REPLACE block.`)
+				}
+				if (blocks.some(block => block.state !== 'done' || block.orig.length === 0)) {
+					throw new Error(`Invalid LLM output format: every SEARCH/REPLACE block must be complete and contain a non-empty ORIGINAL section. Re-read the target range and retry edit_file with a smaller exact block.`)
 				}
 				return { uri, searchReplaceBlocks }
 			},

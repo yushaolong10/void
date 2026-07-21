@@ -31,7 +31,7 @@ import { VOID_ACCEPT_DIFF_ACTION_ID, VOID_REJECT_DIFF_ACTION_ID } from './action
 import { mountCtrlK } from './react/out/quick-edit-tsx/index.js'
 import { QuickEditPropsType } from './quickEditActions.js';
 import { IModelContentChangedEvent } from '../../../../editor/common/textModelEvents.js';
-import { extractCodeFromFIM, extractCodeFromRegular, ExtractedSearchReplaceBlock, extractSearchReplaceBlocks } from '../common/helpers/extractCodeFromResult.js';
+import { decodeSearchReplaceXMLEntities, extractCodeFromFIM, extractCodeFromRegular, ExtractedSearchReplaceBlock, extractSearchReplaceBlocks } from '../common/helpers/extractCodeFromResult.js';
 import { INotificationService, } from '../../../../platform/notification/common/notification.js';
 import { EditorOption } from '../../../../editor/common/config/editorOptions.js';
 import { Emitter } from '../../../../base/common/event.js';
@@ -1699,9 +1699,6 @@ class EditCodeService extends Disposable implements IEditCodeService {
 
 
 	private _instantlyApplySRBlocks(uri: URI, blocksStr: string) {
-		const blocks = extractSearchReplaceBlocks(blocksStr)
-		if (blocks.length === 0) throw new Error(`No Search/Replace blocks were received!`)
-
 		const { model } = this._voidModelService.getModel(uri)
 		if (!model) throw new Error(`Error applying Search/Replace blocks: File does not exist.`)
 		const modelStr = model.getValue(EndOfLinePreference.LF)
@@ -1711,32 +1708,41 @@ class EditCodeService extends Disposable implements IEditCodeService {
 
 
 
-		const replacements: { origStart: number; origEnd: number; block: ExtractedSearchReplaceBlock }[] = []
-		for (const b of blocks) {
-			const res = findTextInCode(b.orig, modelStr, true, { returnType: 'lines' })
-			if (typeof res === 'string')
-				throw new Error(this._errContentOfInvalidStr(res, b.orig))
-			let [startLine, endLine] = res
-			startLine -= 1 // 0-index
-			endLine -= 1
-
-			// including newline before start
-			const origStart = (startLine !== 0 ?
-				modelStrLines.slice(0, startLine).join('\n') + '\n'
-				: '').length
-
-			// including endline at end
-			const origEnd = modelStrLines.slice(0, endLine + 1).join('\n').length - 1
-
-			replacements.push({ origStart, origEnd, block: b });
+		const getReplacements = (candidateBlocksStr: string) => {
+			const blocks = extractSearchReplaceBlocks(candidateBlocksStr)
+			if (blocks.length === 0) throw new Error(`No Search/Replace blocks were received!`)
+			const replacements: { origStart: number; origEnd: number; block: ExtractedSearchReplaceBlock }[] = []
+			for (const b of blocks) {
+				const res = findTextInCode(b.orig, modelStr, true, { returnType: 'lines' })
+				if (typeof res === 'string') throw new Error(this._errContentOfInvalidStr(res, b.orig))
+				let [startLine, endLine] = res
+				startLine -= 1
+				endLine -= 1
+				const origStart = (startLine !== 0 ? modelStrLines.slice(0, startLine).join('\n') + '\n' : '').length
+				const origEnd = modelStrLines.slice(0, endLine + 1).join('\n').length - 1
+				replacements.push({ origStart, origEnd, block: b })
+			}
+			replacements.sort((a, b) => a.origStart - b.origStart)
+			for (let i = 1; i < replacements.length; i++) {
+				if (replacements[i].origStart <= replacements[i - 1].origEnd) {
+					throw new Error(this._errContentOfInvalidStr('Has overlap', replacements[i].block.orig))
+				}
+			}
+			return replacements
 		}
-		// sort in increasing order
-		replacements.sort((a, b) => a.origStart - b.origStart)
 
-		// ensure no overlap
-		for (let i = 1; i < replacements.length; i++) {
-			if (replacements[i].origStart <= replacements[i - 1].origEnd) {
-				throw new Error(this._errContentOfInvalidStr('Has overlap', replacements[i]?.block?.orig))
+		let replacements: ReturnType<typeof getReplacements>
+		try {
+			replacements = getReplacements(blocksStr)
+		}
+		catch (literalError) {
+			const decodedBlocksStr = decodeSearchReplaceXMLEntities(blocksStr)
+			if (decodedBlocksStr === blocksStr) throw literalError
+			try {
+				replacements = getReplacements(decodedBlocksStr)
+			}
+			catch {
+				throw literalError
 			}
 		}
 

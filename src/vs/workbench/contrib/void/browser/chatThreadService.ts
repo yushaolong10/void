@@ -46,6 +46,7 @@ import { ToolContext } from '../common/agent/tools/ToolDefinition.js';
 import { IAgentExtensionService } from './agent/AgentExtensionService.js';
 import { PermissionDecision } from '../common/agent/permissions/PermissionDecision.js';
 import { ExecutionPlan, ExecutionPlanStep, ExecutionPlanStepStatus } from '../common/agent/execution/ExecutionPlan.js';
+import { rewriteFallbackPolicyError } from '../common/agent/tools/EditToolPolicy.js';
 
 
 // related to retrying when LLM message has error
@@ -1433,6 +1434,14 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 				const errorMessage = getErrorMessage(error)
 				this._addMessageToThread(threadId, { role: 'tool', type: 'invalid_params', rawParams: opts.unvalidatedToolParams, result: null, name: toolName, content: errorMessage, id: toolId, mcpServerName })
 				return {}
+			}
+			if (toolName === 'rewrite_file') {
+				const rewriteParams = toolParams as BuiltinToolCallParams['rewrite_file']
+				const policyError = rewriteFallbackPolicyError(this.state.allThreads[threadId]?.messages ?? [], rewriteParams.uri.fsPath)
+				if (policyError) {
+					this._addMessageToThread(threadId, { role: 'tool', type: 'tool_error', params: rewriteParams, result: policyError, name: toolName, content: policyError, id: toolId, rawParams: opts.unvalidatedToolParams, mcpServerName })
+					return {}
+				}
 			}
 				// once validated, add checkpoint for edit
 				if (toolName === 'edit_file') { this._addToolEditCheckpoint({ threadId, uri: (toolParams as BuiltinToolCallParams['edit_file']).uri }) }

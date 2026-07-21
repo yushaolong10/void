@@ -418,7 +418,7 @@ export const builtinTools: {
 
 	edit_file: {
 		name: 'edit_file',
-		description: `Edit the contents of a file. You must provide the file's URI as well as a SINGLE string of SEARCH/REPLACE block(s) that will be used to apply the edit.`,
+		description: `Preferred tool for editing an existing file. Provide the file URI and a SINGLE string of SEARCH/REPLACE block(s). If an edit fails, re-read the smallest relevant range and retry with smaller, exact, unique ORIGINAL context before considering rewrite_file.`,
 		params: {
 			...uriParam('file'),
 			search_replace_blocks: { description: replaceTool_description }
@@ -427,7 +427,7 @@ export const builtinTools: {
 
 	rewrite_file: {
 		name: 'rewrite_file',
-		description: `Edits a file, deleting all the old contents and replacing them with your new contents. Use this tool if you want to edit a file you just created.`,
+		description: `Fallback whole-file replacement. Use for a newly created file, or only after two targeted edit_file attempts on the current file failed even after re-reading fresh context. Never use it as the first choice for an existing file.`,
 		params: {
 			...uriParam('file'),
 			new_content: { description: `The new contents of the file. Must be a string.` }
@@ -748,7 +748,7 @@ ${activeURI}
 		details.push(`Take enough steps to complete the task correctly, but prefer targeted inspection and minimal validation over exhaustive exploration.`)
 		details.push(`You will often need to gather context before making a change. Do not immediately edit unless you have enough context to explain why the change is correct.`)
 		details.push(`Before editing, identify the exact files and code paths involved. If you need more information about a file, variable, function, type, or caller, inspect it first.`)
-		details.push(`Prefer minimal, surgical edits that preserve the existing style. Prefer edit_file for targeted changes. Use rewrite_file only when a file needs to be substantially regenerated or you just created it.`)
+		details.push(`Use edit_file for every edit to an existing file. If it fails, re-read the smallest relevant range, use smaller non-overlapping blocks with exact unique ORIGINAL text, and retry edit_file. Use rewrite_file only for a newly created file or as a final fallback after two targeted edit_file attempts failed on fresh context.`)
 		details.push(`After making changes, verify them. Prefer read_lint_errors for quick checks, inspect the modified file when needed, and use terminal commands for targeted validation such as tests, builds, type checks, format checks, or focused benchmarks when appropriate.`)
 		details.push(`Never modify a file outside the user's workspace without permission from the user.`)
 		details.push(`For non-trivial changes, inspect the smallest set of project-level files needed to understand conventions, such as README, pyproject.toml, package.json, test config, lint config, or nearby tests.`)

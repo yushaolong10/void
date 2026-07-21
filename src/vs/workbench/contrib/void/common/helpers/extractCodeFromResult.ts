@@ -170,6 +170,32 @@ export type ExtractedSearchReplaceBlock = {
 	final: string,
 }
 
+/**
+ * Normalizes common model variations without changing the code contained in a
+ * SEARCH/REPLACE block. This keeps edit_file usable across models that emit the
+ * more common SEARCH/REPLACE marker names or wrap the value in a code fence.
+ */
+export const normalizeSearchReplaceBlocks = (value: string): string => {
+	let normalized = value.replace(/\r\n?/g, '\n').trim()
+	const fenced = /^```[^\n]*\n([\s\S]*?)\n```$/.exec(normalized)
+	if (fenced) normalized = fenced[1]
+
+	return normalized
+		.replace(/^<<<<<<<\s+(?:SEARCH|OLD|BEFORE)\s*$/gm, ORIGINAL)
+		.replace(/^>>>>>>>\s+(?:REPLACE|NEW|AFTER|FINAL)\s*$/gm, FINAL)
+}
+
+/** Decode exactly one XML escaping layer. XML-mode tool calls require source
+ * markup to be escaped, while structured tool calls normally do not. The edit
+ * engine tries this only as a fallback after the literal blocks fail to match.
+ */
+export const decodeSearchReplaceXMLEntities = (value: string): string => value
+	.replace(/&lt;/g, '<')
+	.replace(/&gt;/g, '>')
+	.replace(/&quot;/g, '"')
+	.replace(/&apos;/g, String.fromCharCode(39))
+	.replace(/&amp;/g, '&')
+
 
 // JS substring swaps indices, so "ab".substr(1,0) will NOT be '', it will be 'a'!
 const voidSubstr = (str: string, start: number, end: number) => end < start ? '' : str.substring(start, end)
@@ -456,5 +482,3 @@ export const extractSearchReplaceBlocks = (str: string) => {
 
 
 // runTests()
-
-
