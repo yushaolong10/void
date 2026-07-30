@@ -7,7 +7,6 @@ export const CONTEXT_BUDGET_DEFAULTS = {
 	highWatermark: 0.80,
 	lowWatermark: 0.60,
 	minRecentRounds: 3,
-	maxRoundsPerSummaryChunk: 5,
 	toolResultMaxCharsForSummary: 4_000,
 } as const;
 
@@ -41,6 +40,14 @@ export const stableTextHash = (value: string): string => {
 		hash = Math.imul(hash, 0x01000193);
 	}
 	return (hash >>> 0).toString(16).padStart(8, '0');
+};
+
+export const computeReservedOutputTokens = (
+	contextWindow: number,
+	configured: number | null | undefined,
+): number => {
+	const desired = Math.max(configured ?? 4_096, Math.min(32_768, Math.floor(contextWindow * 0.125)));
+	return Math.min(desired, Math.max(1_024, contextWindow - 2_000));
 };
 
 const importantToolLine = (line: string): boolean =>

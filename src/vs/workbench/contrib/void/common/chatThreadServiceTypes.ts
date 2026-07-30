@@ -64,6 +64,7 @@ export type ChatMessageOrigin =
 	| 'assistant'
 	| 'tool'
 	| 'internal-plan'
+	| 'internal-controller'
 	| 'runtime-context';
 
 export type ChatMessageContextMetadata = {

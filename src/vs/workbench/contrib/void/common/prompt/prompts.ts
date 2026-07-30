@@ -124,20 +124,6 @@ Guidelines:
 // ======================================================== tools ========================================================
 
 
-const chatSuggestionDiffExample = `\
-${tripleTick[0]}typescript
-/Users/username/Dekstop/my_project/app.ts
-// ... existing code ...
-// {{change 1}}
-// ... existing code ...
-// {{change 2}}
-// ... existing code ...
-// {{change 3}}
-// ... existing code ...
-${tripleTick[1]}`
-
-
-
 export type InternalToolInfo = {
 	name: string,
 	description: string,
@@ -675,137 +661,59 @@ ${FINAL}
 
 export const PROMPT_CACHE_BREAKPOINT = '<!-- VOID_PROMPT_CACHE_BREAKPOINT -->'
 
-export const chat_systemMessage = ({ workspaceFolders, openedURIs, activeURI, persistentTerminalIDs, directoryStr, chatMode: mode, mcpTools, includeXMLToolDefinitions, supportsVision }: { workspaceFolders: string[], directoryStr: string, openedURIs: string[], activeURI: string | undefined, persistentTerminalIDs: string[], chatMode: ChatMode, mcpTools: InternalToolInfo[] | undefined, includeXMLToolDefinitions: boolean, supportsVision?: boolean }) => {
-	const stableHeaderBlock = (`You are a senior software engineering ${mode === 'agent' ? 'agent' : 'assistant'} operating inside the user's codebase.
-	Your mission is ${mode === 'agent'
-		? `to help the user understand, modify, debug, test, review, optimize, run, and maintain their code with high correctness and minimal disruption.`
+type ChatSystemMessageOptions = {
+	workspaceFolders: string[];
+	directoryStr: string;
+	openedURIs: string[];
+	activeURI: string | undefined;
+	persistentTerminalIDs: string[];
+	chatMode: ChatMode;
+	mcpTools: InternalToolInfo[] | undefined;
+	includeXMLToolDefinitions: boolean;
+	supportsVision?: boolean;
+}
+
+/**
+ * Keep the universal policy short. Tool schemas own parameter-level guidance,
+ * and provider adapters own native/XML serialization details.
+ */
+export const chat_systemMessage = ({ workspaceFolders, openedURIs, activeURI, persistentTerminalIDs, directoryStr, chatMode: mode, mcpTools, includeXMLToolDefinitions, supportsVision }: ChatSystemMessageOptions) => {
+	const role = mode === 'agent'
+		? `You are a software engineering agent working in the user's workspace. Complete coding tasks end-to-end with small, correct, maintainable changes.`
 		: mode === 'gather'
-			? `to search, understand, and reference the user's codebase with accurate, evidence-backed context.`
-			: mode === 'normal'
-				? `to assist the user with coding tasks using clear, accurate, and maintainable guidance.`
-				: ''}
-	You will be given instructions from the user, and you may also be given a list of files that the user has specifically selected for context, \`SELECTIONS\`.
-	Preserve existing architecture and style, avoid unrelated changes, and be explicit about what is verified versus assumed.`)
+			? `You are a software engineering assistant with read-only workspace tools. Gather targeted evidence and answer accurately.`
+			: `You are a software engineering assistant. Give clear, accurate, maintainable guidance.`
 
+	const policies = [
+		`Use only information from the user, workspace instructions, selected context, and tool results. Distinguish facts from hypotheses.`,
+		`Inspect only the files, symbols, tests, and configuration needed for the task. Prefer targeted search over broad repository exploration.`,
+		`Preserve existing architecture and style. Avoid unrelated changes and never modify outside the workspace without permission.`,
+		`Use tools only when they advance the task. Independent read-only calls may run together; dependent calls and writes should run in order.`,
+		`For existing files, prefer targeted edit_file changes. Use rewrite_file only for new files or when targeted edits cannot be applied safely.`,
+		`After changes, run the smallest useful verification. Never claim a command, test, build, or inspection succeeded unless its result was observed.`,
+		`Stop when the request is complete, blocked, or requires user permission. State any remaining unverified work clearly.`,
+	]
+	if (mode === 'gather') policies.push(`Do not modify workspace files in Gather mode.`)
+	if (mode === 'normal') policies.push(`If repository context is missing, ask the user to attach the relevant file or folder.`)
 
-	const volatileRuntimeBlock = (`Here is the user's current editor/runtime information:
-	<system_info>
-	- ${os}
-
-	- The user's workspace contains these folders:
-	${workspaceFolders.join('\n') || 'NO FOLDERS OPEN'}
-
-- Active file:
-${activeURI}
-
-	- Open files:
-	${openedURIs.join('\n') || 'NO OPENED FILES'}${''/* separator */}${mode === 'agent' && persistentTerminalIDs.length !== 0 ? `
-
-	- Persistent terminal IDs available for you to run commands in: ${persistentTerminalIDs.join(', ')}` : ''}
-	</system_info>`)
-
-
-	const semiStableWorkspaceBlock = (`Here is an overview of the user's file system:
-	<files_overview>
-	${directoryStr}
-	</files_overview>`)
-
-
+	const runtimeLines = [
+		`OS: ${os}`,
+		`Workspace roots: ${workspaceFolders.join(', ') || 'none'}`,
+		activeURI ? `Active file: ${activeURI}` : '',
+		openedURIs.length ? `Open files: ${openedURIs.join(', ')}` : '',
+		mode === 'agent' && persistentTerminalIDs.length ? `Persistent terminals: ${persistentTerminalIDs.join(', ')}` : '',
+	].filter(Boolean)
 	const toolDefinitions = includeXMLToolDefinitions ? systemToolsXMLPrompt(mode, mcpTools, { supportsVision }) : null
+	const workspaceOverview = directoryStr ? `<workspace_overview>\n${directoryStr}\n</workspace_overview>` : ''
 
-	const details: string[] = []
-
-	details.push(`Do not refuse ordinary coding tasks. If a request is unsafe, destructive, outside the workspace, or impossible with available tools, explain the limitation and offer a safe alternative.`)
-	details.push(`Do not make things up or use information not provided in the system information, tools, selections, or user query.`)
-	details.push(`Be evidence-driven. Separate confirmed facts from hypotheses, especially for bugs, regressions, security concerns, and performance claims.`)
-	details.push(`Never claim that a test, build, lint, benchmark, command, or inspection succeeded unless it was actually performed or shown in tool output. If verification is not possible, say exactly what remains unverified.`)
-
-	if (mode === 'agent' || mode === 'gather') {
-		details.push(`Only call tools when they help accomplish the user's goal. If the user simply says hi or asks a question that can be answered without repository context, do NOT use tools.`)
-		details.push(`If a tool is needed, you do not need to ask for permission unless the action is destructive, outside the workspace, or otherwise risky.`)
-		details.push('You may call multiple tools in one response when they are independent read-only calls, or independent write calls that affect different files. Use one tool call at a time when there is any dependency, terminal command, MCP tool, delete operation, or same-file write.')
-		details.push(`Do not say something like "I'm going to use \`tool_name\`". When making a tool call, output only the XML tool call with no prose before or after it.`)
-		details.push(`Many tools only work if the user has a workspace open. If no workspace is available, explain the limitation and continue with the best available context.`)
-		details.push(`Use search_pathnames_only when looking for a specific filename or path.`)
-		details.push(`Use search_for_files for symbols, strings, imports, APIs, config keys, or error text.`)
-		details.push(`Use search_in_file after identifying a likely file and needing exact occurrences.`)
-		if (supportsVision !== false) {
-			details.push(`Use read_image for PNG, JPEG, WebP, or GIF files when visual inspection or image understanding is needed.`)
-		}
-		details.push(`Use get_dir_tree for focused directories when structure matters; avoid broad tree exploration when targeted search is enough.`)
-		details.push(`Use read_file for relevant source, tests, and configuration. Prefer targeted ranges when exact line numbers are known.`)
-		details.push(`Prefer purpose-built tools over terminal commands: use git_status/git_diff for git inspection, git_apply_patch/git_create_branch/git_commit/git_worktree_create/git_worktree_delete for git actions, package_script_list for package scripts, run_tests for tests/builds/lints/type checks, and install_dependencies for dependency installs.`)
-		details.push(`Use run_command only as a fallback for inspection or verification commands that do not have a dedicated tool. Do not use terminal commands for file edits or supported git/package/test actions.`)
-	}
-	else {
-		details.push(`You're allowed to ask the user for more context like file contents or specifications. If this comes up, tell them to reference files and folders by typing @.`)
-	}
-
-	if (mode === 'agent') {
-		details.push(`You are responsible for executing the task end-to-end, not just suggesting ideas.`)
-		details.push(`Always use tools to take actions and implement changes. For example, if you want to edit a file, you MUST use an editing tool.`)
-		details.push(`Follow this workflow whenever possible: 1. Recon - inspect relevant files, symbols, call sites, tests, and configuration. 2. Plan - form the smallest correct change. 3. Execute - make the change with tools. 4. Verify - inspect results and run the smallest useful validation before concluding.`)
-		details.push(`Take enough steps to complete the task correctly, but prefer targeted inspection and minimal validation over exhaustive exploration.`)
-		details.push(`You will often need to gather context before making a change. Do not immediately edit unless you have enough context to explain why the change is correct.`)
-		details.push(`Before editing, identify the exact files and code paths involved. If you need more information about a file, variable, function, type, or caller, inspect it first.`)
-		details.push(`Use edit_file for every edit to an existing file. If it fails, re-read the smallest relevant range, use smaller non-overlapping blocks with exact unique ORIGINAL text, and retry edit_file. Use rewrite_file only for a newly created file or as a final fallback after two targeted edit_file attempts failed on fresh context.`)
-		details.push(`After making changes, verify them. Prefer read_lint_errors for quick checks, inspect the modified file when needed, and use terminal commands for targeted validation such as tests, builds, type checks, format checks, or focused benchmarks when appropriate.`)
-		details.push(`Never modify a file outside the user's workspace without permission from the user.`)
-		details.push(`For non-trivial changes, inspect the smallest set of project-level files needed to understand conventions, such as README, pyproject.toml, package.json, test config, lint config, or nearby tests.`)
-		details.push(`For bug fixes, localize the cause before editing and reproduce the issue when practical.`)
-		details.push(`For feature work, find existing patterns, implement the smallest compatible change, and verify the result.`)
-		details.push(`For refactoring, preserve behavior, make incremental changes, and run targeted tests.`)
-		details.push(`For performance analysis: identify the relevant execution path; inspect callers, callees, loops, I/O, network calls, rendering paths, state updates, caching, concurrency, repeated work, memory growth, serialization, regex/search patterns, and algorithmic complexity before recommending changes.`)
-		details.push(`For performance findings, distinguish confirmed issues from hypotheses, rank by impact and risk, and avoid reporting speculative performance gains as facts.`)
-		details.push(`For code review, prioritize correctness, security, performance, maintainability, and test coverage. Cite exact files, functions, or code paths inspected when possible.`)
-	}
-
-	if (mode === 'gather') {
-		details.push(`You are in Gather mode, so you MUST use tools to gather information, files, and context that help answer the user's query.`)
-		details.push(`Gather enough context to solve the problem, but stay targeted: prefer relevant files, types, call sites, tests, and configuration over exhaustive repository reading.`)
-	}
-
-	details.push(`If you write any code blocks to the user (wrapped in triple backticks), please use this format:
-- Include a language if possible. Terminal should have the language 'shell'.
-- The first line of the code block must be the FULL PATH of the related file if known (otherwise omit).
-- The remaining contents of the file should proceed as usual.`)
-
-	if (mode === 'gather' || mode === 'normal') {
-
-		details.push(`If you think it's appropriate to suggest an edit to a file, then you must describe your suggestion in CODE BLOCK(S).
-- The first line of the code block must be the FULL PATH of the related file if known (otherwise omit).
-- The remaining contents should be a code description of the change to make to the file. \
-Your description is the only context that will be given to another LLM to apply the suggested edit, so it must be accurate and complete. \
-Always bias towards writing as little as possible - NEVER write the whole file. Use comments like "// ... existing code ..." to condense your writing. \
-Here's an example of a good code block:\n${chatSuggestionDiffExample}`)
-	}
-
-	details.push(`When providing a code review or performance analysis, use this structure when useful: Summary; Findings ordered by severity; Evidence; Recommendation; Verification performed; Remaining risks.`)
-	details.push('When suggesting a terminal command or showing a command example in your response text, always use markdown code blocks (```shell ... ```). Never write raw XML tags like <grep> or <npm> or <node> in your response text, because the system will try to parse them as tool calls and fail.')
-	details.push(`Always use MARKDOWN to format lists, bullet points, etc. Do NOT write tables.`)
-
-	const stablePolicyBlock = (`Important notes:
-${details.map((d, i) => `${i + 1}. ${d}`).join('\n\n')}`)
-
-
-	// return answer
-	const ansStrs: string[] = []
-	ansStrs.push(stableHeaderBlock)
-	if (toolDefinitions) ansStrs.push(toolDefinitions)
-	ansStrs.push(stablePolicyBlock)
-	// Provider adapters use this boundary to cache stable policy/tool content while
-	// leaving workspace and editor state outside the explicit cache block.
-	ansStrs.push(PROMPT_CACHE_BREAKPOINT)
-	ansStrs.push(semiStableWorkspaceBlock)
-	ansStrs.push(volatileRuntimeBlock)
-
-	const fullSystemMsgStr = ansStrs
-		.join('\n\n\n')
-		.trim()
-		.replace('\t', '  ')
-
-	return fullSystemMsgStr
-
+	return [
+		role,
+		toolDefinitions,
+		`Operating rules:\n${policies.map((policy, index) => `${index + 1}. ${policy}`).join('\n')}`,
+		PROMPT_CACHE_BREAKPOINT,
+		workspaceOverview,
+		`<runtime_context>\n${runtimeLines.join('\n')}\n</runtime_context>`,
+	].filter(Boolean).join('\n\n').trim()
 }
 
 
@@ -834,6 +742,14 @@ Unresolved:
 Output only the memory.`
 
 export const DEFAULT_FILE_SIZE_LIMIT = 2_000_000
+const MAX_SELECTED_FILE_CHARS = 120_000
+const MAX_SELECTION_CONTEXT_CHARS = 200_000
+
+const capSelectedContext = (value: string, maxChars: number): string => {
+	if (value.length <= maxChars) return value
+	const edgeChars = Math.max(1, Math.floor((maxChars - 80) / 2))
+	return `${value.slice(0, edgeChars)}\n... selected context omitted ...\n${value.slice(-edgeChars)}`
+}
 
 export const readFile = async (fileService: IFileService, uri: URI, fileSizeLimit: number): Promise<{
 	val: string,
@@ -883,7 +799,7 @@ export const messageOfSelection = async (
 		return str
 	}
 	else if (s.type === 'File') {
-		const { val } = await readFile(opts.fileService, s.uri, DEFAULT_FILE_SIZE_LIMIT)
+		const { val } = await readFile(opts.fileService, s.uri, MAX_SELECTED_FILE_CHARS)
 
 		const innerVal = val
 		const content = val === null ? ''
@@ -895,17 +811,7 @@ export const messageOfSelection = async (
 	else if (s.type === 'Folder') {
 		const dirStr: string = await opts.directoryStrService.getDirectoryStrTool(s.uri)
 		const folderStructure = `${s.uri.fsPath} folder structure:${tripleTick[0]}\n${dirStr}\n${tripleTick[1]}`
-
-		const uris = await opts.directoryStrService.getAllURIsInDirectory(s.uri, { maxResults: opts.folderOpts.maxChildren })
-		const strOfFiles = await Promise.all(uris.map(async uri => {
-			const { val, truncated } = await readFile(opts.fileService, uri, opts.folderOpts.maxCharsPerFile)
-			const truncationStr = truncated ? `\n... file truncated ...` : ''
-			const content = val === null ? 'null' : `${tripleTick[0]}\n${val}${truncationStr}\n${tripleTick[1]}`
-			const str = `${uri.fsPath}:\n${content}`
-			return str
-		}))
-		const contentStr = [folderStructure, ...strOfFiles].join('\n\n')
-		return contentStr
+		return `${folderStructure}\nUse workspace tools to read only the files needed from this folder.`
 	}
 	else
 		return ''
@@ -935,7 +841,7 @@ export const chat_userMessageContent = async (
 	let str = ''
 	str += `${instructions}`
 
-	const selnsStr = selnsStrs.join('\n\n') ?? ''
+	const selnsStr = capSelectedContext(selnsStrs.join('\n\n') ?? '', MAX_SELECTION_CONTEXT_CHARS)
 	if (selnsStr) str += `\n---\nSELECTIONS\n${selnsStr}`
 	return str;
 }

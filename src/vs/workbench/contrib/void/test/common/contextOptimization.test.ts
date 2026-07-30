@@ -4,7 +4,7 @@
 
 import assert from 'assert';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
-import { computeTargetSummarizedRoundCount, estimateTextTokens, reduceToolResultForSummary, stableTextHash, startsExternalConversationRound } from '../../common/agent/context/ContextOptimization.js';
+import { computeReservedOutputTokens, computeTargetSummarizedRoundCount, estimateTextTokens, reduceToolResultForSummary, stableTextHash, startsExternalConversationRound } from '../../common/agent/context/ContextOptimization.js';
 
 suite('Void context optimization', () => {
 	ensureNoDisposablesAreLeakedInTestSuite();
@@ -67,5 +67,11 @@ suite('Void context optimization', () => {
 	test('produces stable content hashes', () => {
 		assert.strictEqual(stableTextHash('same'), stableTextHash('same'));
 		assert.notStrictEqual(stableTextHash('same'), stableTextHash('changed'));
+	});
+
+	test('reserves configured output without discarding half the context by default', () => {
+		assert.strictEqual(computeReservedOutputTokens(128_000, 8_192), 16_000);
+		assert.strictEqual(computeReservedOutputTokens(128_000, 32_000), 32_000);
+		assert.strictEqual(computeReservedOutputTokens(4_096, 8_192), 2_096);
 	});
 });

@@ -2,7 +2,7 @@
 
 > 本文档面向：**我在新项目里，想配置一个高度个性化的 Agent。**
 > 前置操作：在 Void Settings → General 中开启 **Disable System Message**（关闭内置 system prompt）。
-> 完成后，内置 system prompt 将不再注入；自定义 Agent 的自主执行计划会启用，Agent 的角色、规则和工作流主要由你的自定义指令控制。
+> 完成后，内置 system prompt 将不再注入；Agent 的角色和规则主要由你的自定义指令控制。工具循环本身不会改变。
 
 ---
 
@@ -117,7 +117,9 @@ GUIDELINES (from the user's .voidrules file):
 （你定义的项目约定）
 ```
 
-内置 system prompt 被关闭后，角色定义和工作流由你控制；工具能力仍由 Void 当前运行环境提供。Agent 会围绕内置的轻量执行计划推进：Recon → Plan → Execute → Verify；你的 `.voidrules` 用来定义每一步应该如何做。
+内置 system prompt 被关闭后，角色定义和工作方式由你控制；工具能力和基础的模型 → 工具 → 结果循环仍由 Void 运行环境提供。Void 不会额外注入固定阶段或隐藏的计划消息。
+
+运行环境仍会执行轻量安全边界：单次 Agent run 最多 640 个模型轮次和 640 次实际工具调用；同一资源的写入按模型顺序执行，不同资源可以并发。当前 run 修改文件后，如果没有成功执行 lint、测试、构建、diff 或 review snapshot，控制器会要求补充一次最小验证后再结束。
 
 ---
 
@@ -784,9 +786,9 @@ AGENTS.md   → 当前项目的"法律"：代码风格、命令、架构（项�
 
 从概念上说：`.voidrules` 定义 Agent **怎么做**，`AGENTS.md` 定义项目**要什么**。
 
-### Q: 自定义 Agent 的自主执行什么时候启用？
+### Q: Disable System Message 会改变 Agent 的执行循环吗？
 
-只有在 Void Settings → General 中开启 **Disable System Message** 后才启用。开启后，Agent 会使用自定义 Agent 的轻量执行计划（Recon → Plan → Execute → Verify）持续推进任务；默认内置 system prompt 模式不会启用这套自主执行逻辑。
+不会。它只控制是否注入 Void 的内置 system prompt。Agent 始终使用同一个轻量工具循环；复杂任务是否需要显式计划，由模型根据任务本身决定。
 
 ### Q: Skill 的 `tools` 字段会限制 Agent 只能使用这些工具吗？
 

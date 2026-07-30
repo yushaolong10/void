@@ -18,7 +18,4 @@ export const VOID_SETTINGS_STORAGE_KEY = 'void.settingsServiceStorageII'
 // 1.0.3
 export const THREAD_STORAGE_KEY = 'void.chatThreadStorageII'
 
-export const AGENT_SESSION_STORAGE_KEY = 'void.agentSessionStorageI'
-
-
 export const OPT_OUT_KEY = 'void.app.optOutAll'

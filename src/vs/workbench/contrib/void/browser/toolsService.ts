@@ -20,7 +20,6 @@ import { IVoidSettingsService } from '../common/voidSettingsService.js'
 import { generateUuid } from '../../../../base/common/uuid.js'
 import { extractSearchReplaceBlocks, normalizeSearchReplaceBlocks } from '../common/helpers/extractCodeFromResult.js'
 import { IBrowserAgentBridge, createLegacyToolInvocation } from './agent/BrowserAgentBridge.js'
-import { ToolRisk } from '../common/agent/tools/ToolDefinition.js'
 import { ReviewSnapshotManager } from '../common/agent/execution/ReviewSnapshotManager.js'
 import { WorktreeManager } from '../common/agent/execution/WorktreeManager.js'
 import { safeStringify } from '../common/agent/tools/safeSerialize.js'
@@ -879,67 +878,7 @@ export class ToolsService implements IToolsService {
 		}
 
 		const originalCallTool = { ...this.callTool } as CallBuiltinTool
-		const riskOfTool: { [T in BuiltinToolName]: ToolRisk } = {
-			read_file: 'read',
-			read_image: 'read',
-			ls_dir: 'read',
-			get_dir_tree: 'read',
-			search_pathnames_only: 'read',
-			search_for_files: 'read',
-			search_in_file: 'read',
-			read_symbol: 'read',
-			find_references: 'read',
-			go_to_definition: 'read',
-			read_lint_errors: 'read',
-			git_status: 'read',
-			git_diff: 'read',
-			git_apply_patch: 'write',
-			git_create_branch: 'execute',
-			git_commit: 'execute',
-			git_worktree_create: 'execute',
-			git_worktree_delete: 'execute',
-			package_script_list: 'read',
-			review_snapshot: 'read',
-			read_test_failures: 'read',
-			rewrite_file: 'write',
-			edit_file: 'write',
-			create_file_or_folder: 'write',
-			delete_file_or_folder: 'delete',
-			run_command: 'execute',
-			run_tests: 'execute',
-			install_dependencies: 'execute',
-			open_persistent_terminal: 'execute',
-			run_persistent_command: 'execute',
-			kill_persistent_terminal: 'execute',
-		}
-
 		for (const toolName of Object.keys(originalCallTool) as BuiltinToolName[]) {
-			this.agentBridge.runtime.tools.register({
-				name: toolName,
-				description: `Void built-in tool: ${toolName}`,
-				inputSchema: { type: 'object' },
-				risk: riskOfTool[toolName],
-				requiresApproval: async () => !!riskOfTool[toolName] && riskOfTool[toolName] !== 'read',
-				invoke: async input => {
-					const runningTool = await originalCallTool[toolName](input as any)
-					const result = await runningTool.result as Awaited<BuiltinToolResultType[typeof toolName]>
-					return {
-						ok: true,
-						data: result,
-						stdout: this.stringOfResult[toolName](input as any, result as any),
-						artifacts: toolName === 'git_worktree_create' && (result as any).path
-							? [{
-								kind: 'patch' as const,
-								title: `Candidate patch ${(result as any).branchName}`,
-								uri: (result as any).path,
-								data: result,
-							}]
-							: undefined,
-					}
-				},
-				renderResultForModel: output => output.stdout ?? output.stderr ?? safeStringify(output.data ?? ''),
-			})
-
 			this.callTool[toolName] = (async (params: any) => {
 				const currentToolContext = this.agentBridge.getCurrentToolContext()
 				const invocation = currentToolContext?.toolInvocation ?? createLegacyToolInvocation(toolName, params)

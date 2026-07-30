@@ -19,12 +19,14 @@ type CandidatePatch = {
 	review?: string;
 }
 
+const isLegacyPlanEvent = (event: AgentEvent) =>
+	event.type === 'plan.created'
+	|| event.type === 'plan.step.started'
+	|| event.type === 'plan.step.completed'
+	|| event.type === 'plan.step.blocked'
+
 const eventTitle = (event: AgentEvent) => {
 	if (event.type === 'run.started') return 'Run started'
-	if (event.type === 'plan.created') return 'Plan created'
-	if (event.type === 'plan.step.started') return `Started ${event.step.title}`
-	if (event.type === 'plan.step.completed') return `Completed ${event.step.title}`
-	if (event.type === 'plan.step.blocked') return `Blocked ${event.step.title}`
 	if (event.type === 'model.delta') return 'Model'
 	if (event.type === 'tool.requested') return `Requested ${event.call.name}`
 	if (event.type === 'permission.required') return 'Permission required'
@@ -40,9 +42,6 @@ const eventTitle = (event: AgentEvent) => {
 
 const eventDetail = (event: AgentEvent) => {
 	if (event.type === 'run.started') return event.goal
-	if (event.type === 'plan.created') return event.plan.steps.map((step, i) => `${i + 1}. ${step.title}`).join('\n')
-	if (event.type === 'plan.step.started' || event.type === 'plan.step.completed') return event.step.description ?? ''
-	if (event.type === 'plan.step.blocked') return event.reason
 	if (event.type === 'model.delta') return event.text.trim()
 	if (event.type === 'tool.requested') return safeStringify(event.call.input)
 	if (event.type === 'permission.required' || event.type === 'permission.resolved') {
@@ -192,26 +191,31 @@ export const AgentTimeline = () => {
 		return sessions.find(session => session.sessionId === selectedSessionId) ?? sessions[sessions.length - 1]
 	}, [sessions, selectedSessionId])
 
-	const events = selectedSession ? timelineService.getEvents(selectedSession.sessionId).slice().reverse() : []
-	const chronologicalEvents = selectedSession ? timelineService.getEvents(selectedSession.sessionId) : []
+	const chronologicalEvents = selectedSession
+		? timelineService.getEvents(selectedSession.sessionId).filter(event => !isLegacyPlanEvent(event))
+		: []
+	const events = chronologicalEvents.slice().reverse()
 	const candidates = useMemo(() => getCandidatePatches(chronologicalEvents), [chronologicalEvents])
 
 	return <div className='flex h-full min-h-0 flex-col bg-void-bg-2 text-void-fg-1'>
 		<div className='border-b border-void-border-3 px-3 py-2'>
-			<div className='text-xs font-medium text-void-fg-2'>Agent Runs</div>
+			<div className='flex items-center justify-between gap-2'>
+				<div className='text-xs font-medium text-void-fg-2'>Agent Runs</div>
+				<div className='text-[10px] text-void-fg-3'>Current session</div>
+			</div>
 			<select
 				className='mt-2 w-full rounded border border-void-border-3 bg-void-bg-1 px-2 py-1 text-xs text-void-fg-1 outline-none'
 				value={selectedSession?.sessionId ?? ''}
 				onChange={e => setSelectedSessionId(e.target.value)}
 			>
-				{sessions.length === 0 ? <option value=''>No runs yet</option> : null}
+				{sessions.length === 0 ? <option value=''>No runs in this session</option> : null}
 				{sessions.map(session => <option key={session.sessionId} value={session.sessionId}>{sessionLabel(session)}</option>)}
 			</select>
 		</div>
 		<CandidatePatchPanel candidates={candidates} />
 		<div className='min-h-0 flex-1 overflow-y-auto'>
 			{events.length === 0
-				? <div className='px-3 py-4 text-xs text-void-fg-3'>No agent timeline events yet.</div>
+				? <div className='px-3 py-4 text-xs text-void-fg-3'>Run an agent task to see activity from this VS Code session.</div>
 				: events.map((event, i) => <EventRow key={`${event.type}-${event.runId}-${i}`} event={event} />)}
 		</div>
 	</div>

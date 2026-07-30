@@ -22,7 +22,7 @@ import { ToolName } from '../common/toolsServiceTypes.js';
 import { IMCPService } from '../common/mcpService.js';
 import { IAgentExtensionService } from './agent/AgentExtensionService.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
-import { computeTargetSummarizedRoundCount, CONTEXT_BUDGET_DEFAULTS, estimateTextTokens, reduceToolResultForSummary, stableTextHash, startsExternalConversationRound } from '../common/agent/context/ContextOptimization.js';
+import { computeReservedOutputTokens, computeTargetSummarizedRoundCount, CONTEXT_BUDGET_DEFAULTS, estimateTextTokens, reduceToolResultForSummary, stableTextHash, startsExternalConversationRound } from '../common/agent/context/ContextOptimization.js';
 
 export const EMPTY_MESSAGE = '(empty message)'
 
@@ -60,24 +60,19 @@ type SimpleLLMMessage = ({
 
 
 
-const CHARS_PER_TOKEN = 4 // assume abysmal chars per token
-const TRIM_TO_LEN = 120
+const CHARS_PER_TOKEN = 4
 const DIRECTORY_STR_CACHE_TTL_MS = 30_000
 const VOID_RULES_CACHE_TTL_MS = 30_000
-const AGENT_MANIFEST_FILENAMES = ['AGENTS.md', 'VOID.md', 'CLAUDE.md', '.voidrules'] as const
+const AGENT_MANIFEST_FILENAMES = ['AGENTS.md', '.voidrules'] as const
 const MAX_IMAGE_PAYLOAD_MESSAGES_IN_HISTORY = 2
+const MAX_TOOL_RESULT_CONTEXT_CHARS = 20_000
 const OLDER_IMAGE_OMITTED_REASON = 'older image omitted from LLM context to reduce cost'
-const HISTORY_SUMMARY_STORAGE_KEY = 'void.agent.historySummaries.v2'
-
-interface HistorySummaryChunk {
-	readonly startRound: number;
-	readonly endRound: number;
-	readonly sourceHash: string;
-	readonly summary: string;
-}
+const HISTORY_SUMMARY_STORAGE_KEY = 'void.agent.historyMemory.v3'
 
 interface ThreadHistorySummaryState {
-	readonly chunks: readonly HistorySummaryChunk[];
+	readonly summarizedRoundCount: number;
+	readonly sourceHash: string;
+	readonly memory: string;
 }
 
 const dataUrlToBase64 = (dataUrl: string) => {
@@ -421,6 +416,72 @@ const prepareMessages_XML_tools = (messages: SimpleLLMMessage[], supportsAnthrop
 
 // --- CHAT ---
 
+type WorkingMessage = SimpleLLMMessage | { role: 'system'; content: string }
+
+const capMessageEdges = (content: string, maxChars: number, label: string): string => {
+	if (content.length <= maxChars) return content
+	const marker = `\n... ${label} omitted ...\n`
+	const edgeChars = Math.max(1, Math.floor((maxChars - marker.length) / 2))
+	return `${content.slice(0, edgeChars)}${marker}${content.slice(-edgeChars)}`
+}
+
+const fitWorkingMessages = (source: WorkingMessage[], maxChars: number): WorkingMessage[] => {
+	const messages = [...source]
+	const totalChars = () => messages.reduce((sum, message) => sum + message.content.length, 0)
+
+	// Drop complete old rounds first so tool calls and their results stay paired.
+	while (totalChars() > maxChars) {
+		const roundStarts = messages
+			.map((message, index) => ({ message, index }))
+			.filter(({ message }) => startsExternalConversationRound(message))
+			.map(({ index }) => index)
+		if (roundStarts.length <= CONTEXT_BUDGET_DEFAULTS.minRecentRounds) break
+		messages.splice(roundStarts[0], roundStarts[1] - roundStarts[0])
+	}
+
+	// Tool output is reproducible and is the next safest content to reduce.
+	for (const message of messages) {
+		if (totalChars() <= maxChars) break
+		if (message.role !== 'tool' || message.content.length <= 1_000) continue
+		const target = Math.max(1_000, message.content.length - (totalChars() - maxChars))
+		message.content = capMessageEdges(message.content, target, `${message.name} output`)
+	}
+
+	// Protect the latest user request. Older assistant prose can be reduced if a
+	// pathological single round still exceeds the provider limit.
+	let latestUserIndex = -1
+	for (let index = messages.length - 1; index >= 0; index--) {
+		if (messages[index].role === 'user') {
+			latestUserIndex = index
+			break
+		}
+	}
+	for (let index = 0; index < messages.length; index++) {
+		if (totalChars() <= maxChars) break
+		const message = messages[index]
+		if (message.role !== 'assistant' || index > latestUserIndex || message.content.length <= 1_000) continue
+		const target = Math.max(1_000, message.content.length - (totalChars() - maxChars))
+		message.content = capMessageEdges(message.content, target, 'assistant response')
+	}
+
+	if (totalChars() > maxChars) {
+		const systemMessage = messages.find(message => message.role === 'system')
+		if (systemMessage) {
+			systemMessage.content = capMessageEdges(systemMessage.content, Math.max(2_000, Math.floor(maxChars * 0.35)), 'workspace instructions')
+		}
+	}
+	if (totalChars() > maxChars && latestUserIndex >= 0) {
+		const latestUser = messages[latestUserIndex]
+		latestUser.content = capMessageEdges(
+			latestUser.content,
+			Math.max(2_000, latestUser.content.length - (totalChars() - maxChars)),
+			'selected context',
+		)
+		syncTrimmedUserContentToParts(latestUser)
+	}
+	return messages
+}
+
 const prepareOpenAIOrAnthropicMessages = ({
 	messages: messages_,
 	systemMessage,
@@ -441,10 +502,7 @@ const prepareOpenAIOrAnthropicMessages = ({
 	reservedOutputTokenSpace: number | null | undefined,
 }): { messages: AnthropicOrOpenAILLMMessage[], separateSystemMessage: string | undefined } => {
 
-	reservedOutputTokenSpace = Math.max(
-		contextWindow * 1 / 2, // reserve at least 1/4 of the token window length
-		reservedOutputTokenSpace ?? 4_096 // defaults to 4096
-	)
+	reservedOutputTokenSpace = computeReservedOutputTokens(contextWindow, reservedOutputTokenSpace)
 	// User parts are updated when text is trimmed, so clone the nested array as well.
 	let messages: (SimpleLLMMessage | { role: 'system', content: string })[] = messages_.map(m => m.role === 'user'
 		? { ...m, parts: m.parts?.map(part => ({ ...part })) }
@@ -467,72 +525,11 @@ const prepareOpenAIOrAnthropicMessages = ({
 		return next
 	})
 
-	type MesType = (typeof messages)[0]
-
 	// ================ fit into context ================
-
-	// Pre-compute weights once (O(n)), sort (O(n log n)), then trim in order.
-	// We use message count from outside the closure for O(1) access.
-	const msgCount = messages.length
-
-	const weight = (message: MesType, idx: number) => {
-		const base = message.content.length
-
-		let multiplier: number
-		multiplier = 1 + (msgCount - 1 - idx) / msgCount // slow rampdown from 2 to 1 as index increases
-		if (message.role === 'user') {
-			multiplier *= 1
-		}
-		else if (message.role === 'system') {
-			multiplier *= .01 // very low weight
-		}
-		else {
-			multiplier *= 10 // llm tokens are far less valuable than user tokens
-		}
-		// 1st and last messages should be very low weight
-		if (idx <= 1 || idx >= msgCount - 1 - 3) {
-			multiplier *= .05
-		}
-		return base * multiplier
-	}
-
-	let totalLen = 0
-	for (const m of messages) { totalLen += m.content.length }
-	const charsNeedToTrim = totalLen - Math.max(
-		(contextWindow - reservedOutputTokenSpace) * CHARS_PER_TOKEN,
-		5_000
+	messages = fitWorkingMessages(
+		messages,
+		Math.max((contextWindow - reservedOutputTokenSpace) * CHARS_PER_TOKEN, 5_000),
 	)
-
-	if (charsNeedToTrim > 0) {
-		// Build a sorted list of indices by weight descending
-		const indicesWithWeight: { idx: number; weight: number }[] = []
-		for (let i = 0; i < messages.length; i += 1) {
-			indicesWithWeight.push({ idx: i, weight: weight(messages[i], i) })
-		}
-		indicesWithWeight.sort((a, b) => b.weight - a.weight) // highest weight first
-
-		let remainingCharsToTrim = charsNeedToTrim
-
-		for (const { idx } of indicesWithWeight) {
-			if (remainingCharsToTrim <= 0) break
-
-			const m = messages[idx]
-			const trimmedLen = TRIM_TO_LEN - '...'.length
-			const numCharsWillTrim = m.content.length - trimmedLen
-
-			// If trimming this message to TRIM_TO_LEN is more than enough, do a partial trim and finish
-			if (numCharsWillTrim > remainingCharsToTrim) {
-				m.content = m.content.slice(0, m.content.length - remainingCharsToTrim - '...'.length).trim() + '...'
-				syncTrimmedUserContentToParts(m)
-				break
-			}
-
-			// Trim the entire message to TRIM_TO_LEN
-			remainingCharsToTrim -= numCharsWillTrim
-			m.content = m.content.substring(0, trimmedLen) + '...'
-			syncTrimmedUserContentToParts(m)
-		}
-	}
 
 
 	// ================ system message hack ================
@@ -705,7 +702,7 @@ const prepareMessages = (params: {
 
 export interface IConvertToLLMMessageService {
 	readonly _serviceBrand: undefined;
-	prepareAgentRunPromptContext: (opts: { chatMode: ChatMode, modelSelection: ModelSelection | null }) => Promise<{ systemMessage: string, aiInstructions: string }>
+	prepareAgentRunPromptContext: (opts: { chatMode: ChatMode, modelSelection: ModelSelection | null, taskText?: string }) => Promise<{ systemMessage: string, aiInstructions: string }>
 	prepareLLMSimpleMessages: (opts: { simpleMessages: SimpleLLMMessage[], systemMessage: string, modelSelection: ModelSelection | null, featureName: FeatureName }) => { messages: LLMChatMessage[], separateSystemMessage: string | undefined }
 	prepareLLMChatMessages: (opts: { chatMessages: ChatMessage[], chatMode: ChatMode, modelSelection: ModelSelection | null, promptContextOverride?: { systemMessage: string, aiInstructions: string }, threadId: string, onWillCompress?: () => void }) => Promise<{ messages: LLMChatMessage[], separateSystemMessage: string | undefined }>
 	prepareFIMMessage(opts: { messages: LLMFIMMessage, }): { prefix: string, suffix: string, stopTokens: string[] }
@@ -748,8 +745,8 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 		value: string;
 	} | null = null;
 
-	// Frozen summaries are persisted and guarded by a hash of their source rounds.
-	// A thread edit invalidates only the affected chunk and everything after it.
+	// One persisted memory is guarded by a hash of its source rounds. Editing
+	// summarized history invalidates the memory and rebuilds it from source.
 	private readonly _summaryBySession = new Map<string, ThreadHistorySummaryState>();
 
 	constructor(
@@ -776,7 +773,13 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 		try {
 			const parsed = JSON.parse(raw) as Record<string, ThreadHistorySummaryState>
 			for (const [threadId, state] of Object.entries(parsed)) {
-				if (Array.isArray(state?.chunks)) this._summaryBySession.set(threadId, state)
+				if (
+					Number.isInteger(state?.summarizedRoundCount)
+					&& typeof state?.sourceHash === 'string'
+					&& typeof state?.memory === 'string'
+				) {
+					this._summaryBySession.set(threadId, state)
+				}
 			}
 		}
 		catch {
@@ -872,10 +875,10 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 		return ans.join('\n\n')
 	}
 
-	private async _getCombinedAIInstructionsAsync(): Promise<string> {
+	private async _getCombinedAIInstructionsAsync(taskText?: string): Promise<string> {
 		const globalAIInstructions = this.voidSettingsService.state.globalSettings.aiInstructions;
 		const voidRulesFileContent = await this._getVoidRulesFileContentsAsync();
-		const skillInstructions = this._getSkillInstructions();
+		const skillInstructions = this._getSkillInstructions(taskText);
 
 		const ans: string[] = [];
 		if (globalAIInstructions) ans.push(globalAIInstructions);
@@ -884,17 +887,35 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 		return ans.join('\n\n');
 	}
 
-	private _getSkillInstructions(): string {
+	private _getSkillInstructions(taskText?: string): string {
 		const skills = this._agentExtensionService.listSkills();
 		if (!skills.length) return '';
+		const normalizedTask = taskText?.toLocaleLowerCase() ?? '';
+		const selectedSkills = normalizedTask
+			? skills
+				.map(skill => {
+					const searchableTerms = [skill.name, ...skill.description.split(/[^\p{L}\p{N}_-]+/u)]
+						.map(term => term.trim().toLocaleLowerCase())
+						.filter(term => term.length >= 3);
+					const score = searchableTerms.reduce((sum, term) => sum + (normalizedTask.includes(term) ? 1 : 0), 0);
+					return { skill, score };
+				})
+				.filter(candidate => candidate.score > 0)
+				.sort((a, b) => b.score - a.score || a.skill.name.localeCompare(b.skill.name))
+				.slice(0, 2)
+				.map(candidate => candidate.skill)
+			: [];
+		const catalog = [...skills]
+			.sort((a, b) => a.name.localeCompare(b.name))
+			.map(skill => `- ${skill.name}: ${skill.description || '(no description)'}`);
+		const selected = selectedSkills.map(skill => {
+			const tools = skill.tools.length ? skill.tools.join(', ') : 'any appropriate tool';
+			return `## Active skill: ${skill.name}\nTools: ${tools}\n${skill.body.trim().slice(0, 4000)}`;
+		});
 		return [
 			'# Available Void Skills',
-			'Use these workspace skills when the user task matches their description. Respect each skill tool list and context.',
-			...[...skills].sort((a, b) => a.name.localeCompare(b.name)).map(skill => {
-				const tools = skill.tools.length ? skill.tools.join(', ') : 'any appropriate tool';
-				const body = skill.body.trim().slice(0, 4000);
-				return `## ${skill.name}\nDescription: ${skill.description || '(none)'}\nContext: ${skill.context}\nTools: ${tools}\n${body}`;
-			}),
+			...catalog,
+			...selected,
 		].join('\n\n');
 	}
 
@@ -944,7 +965,9 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 		)];
 		const activeURI = this.editorService.activeEditor?.resource?.fsPath;
 
-		const directoryStr = await this._getDirectoryStrCached(chatMode)
+		// Agent mode discovers repository structure with targeted tools. Injecting a
+		// broad tree on every run costs tokens and quickly becomes stale.
+		const directoryStr = chatMode === 'agent' ? '' : await this._getDirectoryStrCached(chatMode)
 
 		const includeXMLToolDefinitions = !specialToolFormat
 
@@ -1007,7 +1030,11 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 		const parts: string[] = []
 		for (const m of round) {
 			if (m.role === 'user') {
-				const label = m.contextMeta?.origin === 'internal-plan' ? 'Internal plan update' : 'User'
+				const label = m.contextMeta?.origin === 'internal-plan'
+					? 'Internal plan update'
+					: m.contextMeta?.origin === 'internal-controller'
+						? 'Controller'
+						: 'User'
 				parts.push(`${label}: ${m.content}`)
 			} else if (m.role === 'assistant') {
 				parts.push(`Assistant: ${m.content}`)
@@ -1036,12 +1063,12 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 		}, 0)
 	}
 
-	// Synchronously compress a list of rounds using LLM (or fallback to rule-based summary).
-	// Returns a single compact summary string for all the given rounds.
-	private async _llmCompress(rounds: SimpleLLMMessage[][], modelSelection: ModelSelection): Promise<string> {
+	private async _llmCompress(rounds: SimpleLLMMessage[][], modelSelection: ModelSelection, previousMemory = ''): Promise<string> {
 		const dialogStr = rounds.map(r => this._roundToCompressionPrompt(r)).join('\n\n---\n\n')
-
-		const prompt = `${compressHistoryPrompt}\n\n${dialogStr}\n\nSummary:`
+		const previousMemoryBlock = previousMemory
+			? `Existing memory to update:\n${previousMemory}\n\nNew conversation rounds:`
+			: 'Conversation rounds:'
+		const prompt = `${compressHistoryPrompt}\n\n${previousMemoryBlock}\n${dialogStr}\n\nUpdated memory:`
 
 		try {
 			// Use sendLLMMessage with the user's chat model for compression.
@@ -1091,31 +1118,26 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 		}
 	}
 
-	// Get or create compressed summaries for a thread.
-	// Returns memory to prepend to the oldest retained user turn and the filtered messages.
-	private async _getOrCreateCompressedSummaries(
+	// Maintain one structured memory per thread. It atomically replaces the older
+	// memory instead of accumulating a chain of summary chunks.
+	private async _getOrCreateHistoryMemory(
 		threadId: string,
 		messages: SimpleLLMMessage[],
 		modelSelection: ModelSelection,
 		historyBudgetTokens: number,
 		onWillCompress?: () => void,
 	): Promise<{
-		summaryStr: string; // the full summary string (multiple blocks concatenated), or empty if no compression needed
-		filteredMessages: SimpleLLMMessage[]; // messages after removing summarized rounds
+		summaryStr: string;
+		filteredMessages: SimpleLLMMessage[];
 	}> {
 		const rounds = this._splitIntoRounds(messages)
 		const { maxSummaryChars } = CHAT_HISTORY_COMPRESSION
-		const existingChunks = this._summaryBySession.get(threadId)?.chunks ?? []
-		const validChunks: HistorySummaryChunk[] = []
-		for (const chunk of existingChunks) {
-			if (chunk.startRound !== (validChunks[validChunks.length - 1]?.endRound ?? 0)) break
-			if (chunk.endRound > rounds.length) break
-			if (this._roundHash(rounds.slice(chunk.startRound, chunk.endRound)) !== chunk.sourceHash) break
-			validChunks.push(chunk)
-		}
-
-		let summarizedRoundCount = validChunks[validChunks.length - 1]?.endRound ?? 0
-		const summaryTokens = validChunks.reduce((sum, chunk) => sum + estimateTextTokens(chunk.summary), 0)
+		const stored = this._summaryBySession.get(threadId)
+		const storedIsValid = !!stored
+			&& stored.summarizedRoundCount <= rounds.length
+			&& this._roundHash(rounds.slice(0, stored.summarizedRoundCount)) === stored.sourceHash
+		let summarizedRoundCount = storedIsValid ? stored!.summarizedRoundCount : 0
+		let memory = storedIsValid ? stored!.memory : ''
 		const targetSummarizedRoundCount = computeTargetSummarizedRoundCount({
 			rounds: rounds.map(round => ({
 				tokenCost: this._roundTokenCost(round),
@@ -1123,57 +1145,39 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 			})),
 			alreadySummarized: summarizedRoundCount,
 			historyBudgetTokens,
-			summaryTokens,
+			summaryTokens: estimateTextTokens(memory),
 		})
 
-		if (summarizedRoundCount < targetSummarizedRoundCount) onWillCompress?.()
-		while (summarizedRoundCount < targetSummarizedRoundCount) {
-			const endRound = Math.min(
-				targetSummarizedRoundCount,
-				summarizedRoundCount + CONTEXT_BUDGET_DEFAULTS.maxRoundsPerSummaryChunk,
+		if (summarizedRoundCount < targetSummarizedRoundCount) {
+			onWillCompress?.()
+			memory = await this._llmCompress(
+				rounds.slice(summarizedRoundCount, targetSummarizedRoundCount),
+				modelSelection,
+				memory,
 			)
-			const sourceRounds = rounds.slice(summarizedRoundCount, endRound)
-			const compressed = await this._llmCompress(sourceRounds, modelSelection)
-			validChunks.push({
-				startRound: summarizedRoundCount,
-				endRound,
-				sourceHash: this._roundHash(sourceRounds),
-				summary: compressed,
-			})
-			summarizedRoundCount = endRound
+			memory = capMessageEdges(memory, maxSummaryChars, 'older memory')
+			summarizedRoundCount = targetSummarizedRoundCount
 		}
 
-		this._summaryBySession.set(threadId, { chunks: validChunks })
+		if (summarizedRoundCount > 0) {
+			this._summaryBySession.set(threadId, {
+				summarizedRoundCount,
+				sourceHash: this._roundHash(rounds.slice(0, summarizedRoundCount)),
+				memory,
+			})
+		}
+		else {
+			this._summaryBySession.delete(threadId)
+		}
 		this._storeHistorySummaries()
 
 		if (summarizedRoundCount === 0) {
 			return { summaryStr: '', filteredMessages: messages }
 		}
-
-		const fullRounds = rounds.slice(summarizedRoundCount)
-
-		// Build the summary string
-		let summaryStr = ''
-		if (validChunks.length > 0) {
-			const blocks = validChunks.map((chunk, i) => `Summary ${i + 1} (rounds ${chunk.startRound + 1}-${chunk.endRound}):\n${chunk.summary}`)
-			summaryStr = blocks.join('\n\n')
-			if (summaryStr.length > maxSummaryChars) {
-				const first = blocks[0].slice(0, Math.min(1_500, maxSummaryChars))
-				const latest: string[] = []
-				let used = first.length + 80
-				for (let i = blocks.length - 1; i > 0; i--) {
-					if (used + blocks[i].length > maxSummaryChars) break
-					latest.unshift(blocks[i])
-					used += blocks[i].length + 2
-				}
-				summaryStr = `${first}\n\n[Some intermediate summaries omitted]\n\n${latest.join('\n\n')}`.slice(0, maxSummaryChars)
-			}
+		return {
+			summaryStr: memory,
+			filteredMessages: rounds.slice(summarizedRoundCount).flat(),
 		}
-
-		// The filtered messages = only the full rounds
-		const filteredMessages = fullRounds.flat()
-
-		return { summaryStr, filteredMessages }
 	}
 
 	// --- LLM Chat messages ---
@@ -1224,10 +1228,10 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 					const imageAttachmentForLLM = imageAttachment && !imagePayloadMessageIdxs.has(i) && !imageAttachment.isLLMDisabled
 						? { ...imageAttachment, isLLMDisabled: true, disabledReason: OLDER_IMAGE_OMITTED_REASON }
 						: imageAttachment
-				simpleLLMMessages.push({
-					role: m.role,
-					contextMeta: m.contextMeta,
-						content: m.content,
+					simpleLLMMessages.push({
+						role: m.role,
+						contextMeta: m.contextMeta,
+							content: reduceToolResultForSummary(m.name, m.content, MAX_TOOL_RESULT_CONTEXT_CHARS),
 						name: m.name,
 						id: m.id,
 						rawParams: m.rawParams,
@@ -1300,7 +1304,7 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 		})
 		return { messages, separateSystemMessage };
 	}
-	prepareAgentRunPromptContext: IConvertToLLMMessageService['prepareAgentRunPromptContext'] = async ({ chatMode, modelSelection }) => {
+	prepareAgentRunPromptContext: IConvertToLLMMessageService['prepareAgentRunPromptContext'] = async ({ chatMode, modelSelection, taskText }) => {
 		if (modelSelection === null) return { systemMessage: '', aiInstructions: '' }
 
 		const { overridesOfModel } = this.voidSettingsService.state
@@ -1310,7 +1314,7 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 
 		const fullSystemMessage = await this._generateChatMessagesSystemMessage(chatMode, specialToolFormat, supportsVision)
 		const systemMessage = disableSystemMessage ? '' : fullSystemMessage
-		const aiInstructions = await this._getCombinedAIInstructionsAsync()
+		const aiInstructions = await this._getCombinedAIInstructionsAsync(taskText)
 
 		return { systemMessage, aiInstructions }
 	}
@@ -1326,7 +1330,12 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 			supportsSystemMessage,
 		} = getModelCapabilities(providerName, modelName, overridesOfModel)
 
-		const promptContext = promptContextOverride ?? await this.prepareAgentRunPromptContext({ chatMode, modelSelection })
+		const latestUserText = [...chatMessages].reverse().find(message => message.role === 'user')
+		const promptContext = promptContextOverride ?? await this.prepareAgentRunPromptContext({
+			chatMode,
+			modelSelection,
+			taskText: latestUserText?.role === 'user' ? latestUserText.content : undefined,
+		})
 		const systemMessage = promptContext.systemMessage
 
 		const modelSelectionOptions = this.voidSettingsService.state.optionsOfModelSelection['Chat'][modelSelection.providerName]?.[modelSelection.modelName]
@@ -1340,10 +1349,10 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 		let effectiveMessages = llmMessages
 
 		if (threadId) {
-			const reservedForBudget = Math.max(contextWindow * 1 / 2, reservedOutputTokenSpace ?? 4_096)
+			const reservedForBudget = computeReservedOutputTokens(contextWindow, reservedOutputTokenSpace)
 			const fixedPromptTokens = estimateTextTokens(`${aiInstructions}\n${systemMessage}`) + 2_048 // native tool schemas
 			const historyBudgetTokens = Math.max(2_000, contextWindow - reservedForBudget - fixedPromptTokens)
-			const { summaryStr, filteredMessages } = await this._getOrCreateCompressedSummaries(threadId, llmMessages, modelSelection, historyBudgetTokens, onWillCompress)
+			const { summaryStr, filteredMessages } = await this._getOrCreateHistoryMemory(threadId, llmMessages, modelSelection, historyBudgetTokens, onWillCompress)
 			if (summaryStr) {
 				effectiveMessages = filteredMessages.map(message => message.role === 'user'
 					? { ...message, parts: message.parts?.map(part => ({ ...part })) }
