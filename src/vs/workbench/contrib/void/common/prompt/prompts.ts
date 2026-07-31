@@ -23,6 +23,7 @@ export const MAX_DIRSTR_RESULTS_TOTAL_TOOL = 100
 
 // tool info
 export const MAX_FILE_CHARS_PAGE = 500_000
+export const MAX_READ_FILE_CONTEXT_CHARS_PAGE = 18_000
 export const MAX_CHILDREN_URIs_PAGE = 500
 
 // terminal tool info
@@ -178,11 +179,11 @@ export const builtinTools: {
 
 	read_file: {
 		name: 'read_file',
-		description: `Returns full contents of a given file.`,
+		description: `Returns one contiguous page of a file. If the result says more content remains, read the same URI and line range with the next page_number before advancing to another range.`,
 		params: {
 			...uriParam('file'),
-			start_line: { description: 'Optional. Do NOT fill this field in unless you were specifically given exact line numbers to search. Defaults to the beginning of the file.' },
-			end_line: { description: 'Optional. Do NOT fill this field in unless you were specifically given exact line numbers to search. Defaults to the end of the file.' },
+			start_line: { description: 'Optional. Inclusive, 1-based start line. Defaults to the beginning of the file.' },
+			end_line: { description: 'Optional. Inclusive, 1-based end line. Defaults to the end of the file.' },
 			...paginationParam,
 		},
 	},

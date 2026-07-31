@@ -15,13 +15,14 @@ import { IVoidCommandBarService } from './voidCommandBarService.js'
 import { computeDirectoryTree1Deep, IDirectoryStrService, stringifyDirectoryTree1Deep } from '../common/directoryStrService.js'
 import { IMarkerService, MarkerSeverity } from '../../../../platform/markers/common/markers.js'
 import { RawToolParamsObj } from '../common/sendLLMMessageTypes.js'
-import { MAX_CHILDREN_URIs_PAGE, MAX_FILE_CHARS_PAGE, MAX_TERMINAL_BG_COMMAND_TIME, MAX_TERMINAL_INACTIVE_TIME, MAX_TERMINAL_TOTAL_TIME } from '../common/prompt/prompts.js'
+import { MAX_CHILDREN_URIs_PAGE, MAX_FILE_CHARS_PAGE, MAX_READ_FILE_CONTEXT_CHARS_PAGE, MAX_TERMINAL_BG_COMMAND_TIME, MAX_TERMINAL_INACTIVE_TIME, MAX_TERMINAL_TOTAL_TIME } from '../common/prompt/prompts.js'
 import { IVoidSettingsService } from '../common/voidSettingsService.js'
 import { generateUuid } from '../../../../base/common/uuid.js'
 import { extractSearchReplaceBlocks, normalizeSearchReplaceBlocks } from '../common/helpers/extractCodeFromResult.js'
 import { IBrowserAgentBridge, createLegacyToolInvocation } from './agent/BrowserAgentBridge.js'
 import { ReviewSnapshotManager } from '../common/agent/execution/ReviewSnapshotManager.js'
 import { WorktreeManager } from '../common/agent/execution/WorktreeManager.js'
+import { paginateContiguousSource } from '../common/agent/context/ContextOptimization.js'
 import { safeStringify } from '../common/agent/tools/safeSerialize.js'
 import type { ImageAttachment } from '../common/chatThreadServiceTypes.js'
 
@@ -264,8 +265,9 @@ export class ToolsService implements IToolsService {
 				let startLine = validateNumber(startLineUnknown, { default: null })
 				let endLine = validateNumber(endLineUnknown, { default: null })
 
-				if (startLine !== null && startLine < 1) startLine = null
-				if (endLine !== null && endLine < 1) endLine = null
+				if (startLine !== null && startLine < 1) throw new Error('start_line must be a 1-based line number greater than or equal to 1.')
+				if (endLine !== null && endLine < 1) throw new Error('end_line must be a 1-based line number greater than or equal to 1.')
+				if (startLine !== null && endLine !== null && startLine > endLine) throw new Error('start_line must be less than or equal to end_line.')
 
 				return { uri, startLine, endLine, pageNumber }
 			},
@@ -527,24 +529,35 @@ export class ToolsService implements IToolsService {
 				const { model } = await voidModelService.getModelSafe(uri)
 				if (model === null) { throw new Error(`No contents; File does not exist.`) }
 
+				const startLineNumber = startLine === null ? 1 : startLine
+				const endLineNumber = endLine === null ? model.getLineCount() : endLine
 				let contents: string
 				if (startLine === null && endLine === null) {
 					contents = model.getValue(EndOfLinePreference.LF)
 				}
 				else {
-					const startLineNumber = startLine === null ? 1 : startLine
-					const endLineNumber = endLine === null ? model.getLineCount() : endLine
 					contents = model.getValueInRange({ startLineNumber, startColumn: 1, endLineNumber, endColumn: Number.MAX_SAFE_INTEGER }, EndOfLinePreference.LF)
 				}
 
 				const totalNumLines = model.getLineCount()
 
-				const fromIdx = MAX_FILE_CHARS_PAGE * (pageNumber - 1)
-				const toIdx = MAX_FILE_CHARS_PAGE * pageNumber - 1
-				const fileContents = contents.slice(fromIdx, toIdx + 1) // paginate
-				const hasNextPage = (contents.length - 1) - toIdx >= 1
+				const pages = paginateContiguousSource(contents, startLineNumber, MAX_READ_FILE_CONTEXT_CHARS_PAGE)
+				const page = pages[pageNumber - 1]
+				const fileContents = page?.content ?? ''
+				const hasNextPage = pageNumber < pages.length
 				const totalFileLen = contents.length
-				return { result: { fileContents, totalFileLen, hasNextPage, totalNumLines } }
+				return {
+					result: {
+						fileContents,
+						totalFileLen,
+						hasNextPage,
+						totalNumLines,
+						pageStartLine: page?.startLine ?? startLineNumber,
+						pageEndLine: page?.endLine ?? startLineNumber,
+						startsMidLine: page?.startsMidLine ?? false,
+						endsMidLine: page?.endsMidLine ?? false,
+					}
+				}
 			},
 			read_image: async ({ uri }) => {
 				const mimeType = imageMimeTypeOfPath(uri.fsPath)
@@ -948,7 +961,13 @@ export class ToolsService implements IToolsService {
 		// given to the LLM after the call for successful tool calls
 		this.stringOfResult = {
 			read_file: (params, result) => {
-				return `${params.uri.fsPath}\n\`\`\`\n${result.fileContents}\n\`\`\`${nextPageStr(result.hasNextPage)}${result.hasNextPage ? `\nMore info because truncated: this file has ${result.totalNumLines} lines, or ${result.totalFileLen} characters.` : ''}`
+				const partialLineNote = result.startsMidLine || result.endsMidLine
+					? `\nThis page ${result.startsMidLine ? 'starts' : 'ends'} in the middle of an unusually long line.`
+					: ''
+				const continuation = result.hasNextPage
+					? `\n\nMore contiguous content remains in the requested range. Before advancing to another line range, call read_file again with the same uri/start_line/end_line and page_number=${params.pageNumber + 1}.`
+					: ''
+				return `${params.uri.fsPath}\nReturned contiguous lines ${result.pageStartLine}-${result.pageEndLine} (page ${params.pageNumber}).${partialLineNote}\n\`\`\`\n${result.fileContents}\n\`\`\`${continuation}\nFile info: the file has ${result.totalNumLines} lines; the requested range has ${result.totalFileLen} characters.`
 			},
 			read_image: (params, result) => {
 				return `${params.uri.fsPath}\n[Image: ${result.attachment.name}, ${result.attachment.mimeType}, ${result.attachment.sizeBytes} bytes]`

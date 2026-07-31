@@ -92,7 +92,16 @@ export type BuiltinToolCallParams = {
 
 // RESULT OF TOOL CALL
 export type BuiltinToolResultType = {
-	'read_file': { fileContents: string, totalFileLen: number, totalNumLines: number, hasNextPage: boolean },
+	'read_file': {
+		fileContents: string;
+		totalFileLen: number;
+		totalNumLines: number;
+		hasNextPage: boolean;
+		pageStartLine: number;
+		pageEndLine: number;
+		startsMidLine: boolean;
+		endsMidLine: boolean;
+	},
 	'read_image': { attachment: ImageAttachment },
 	'ls_dir': { children: ShallowDirectoryItem[] | null, hasNextPage: boolean, hasPrevPage: boolean, itemsRemaining: number },
 	'get_dir_tree': { str: string, },

@@ -10,6 +10,55 @@ export const CONTEXT_BUDGET_DEFAULTS = {
 	toolResultMaxCharsForSummary: 4_000,
 } as const;
 
+export interface ContiguousSourcePage {
+	readonly content: string;
+	readonly startLine: number;
+	readonly endLine: number;
+	readonly startsMidLine: boolean;
+	readonly endsMidLine: boolean;
+}
+
+/**
+ * Split source text into contiguous pages. Prefer line boundaries so a caller can
+ * continue with the next page without losing the middle of a requested range.
+ * A single line longer than maxChars is necessarily split across pages.
+ */
+export const paginateContiguousSource = (
+	content: string,
+	firstLine: number,
+	maxChars: number,
+): ContiguousSourcePage[] => {
+	if (!content) return [{ content: '', startLine: firstLine, endLine: firstLine, startsMidLine: false, endsMidLine: false }];
+
+	const pageLimit = Math.max(1, Math.floor(maxChars));
+	const pages: ContiguousSourcePage[] = [];
+	let offset = 0;
+	let line = firstLine;
+	let startsMidLine = false;
+
+	while (offset < content.length) {
+		const proposedEnd = Math.min(content.length, offset + pageLimit);
+		let end = proposedEnd;
+		if (proposedEnd < content.length) {
+			const lastNewline = content.lastIndexOf('\n', proposedEnd - 1);
+			if (lastNewline >= offset) end = lastNewline + 1;
+		}
+
+		const pageContent = content.slice(offset, end);
+		const newlineCount = pageContent.split('\n').length - 1;
+		const endsWithNewline = pageContent.endsWith('\n');
+		const endLine = Math.max(line, line + newlineCount - (endsWithNewline ? 1 : 0));
+		const endsMidLine = end < content.length && !endsWithNewline;
+		pages.push({ content: pageContent, startLine: line, endLine, startsMidLine, endsMidLine });
+
+		offset = end;
+		line += newlineCount;
+		startsMidLine = endsMidLine;
+	}
+
+	return pages;
+};
+
 export interface HistoryRoundCost {
 	readonly tokenCost: number;
 	readonly pinned?: boolean;
@@ -75,6 +124,20 @@ export const reduceToolResultForSummary = (toolName: string, content: string, ma
 		importantText ? `Important lines:\n${importantText}` : '',
 	].filter(Boolean).join('\n')
 	return `[${toolName} result reduced from ${content.length} chars]\n${reduced}`;
+};
+
+/**
+ * Source code must remain contiguous. Log-style head/tail extraction can create
+ * permanent gaps when the model reads adjacent line ranges.
+ */
+export const reduceSourceResultForContext = (
+	toolName: string,
+	content: string,
+	maxChars: number,
+): string => {
+	if (content.length <= maxChars) return content;
+	const marker = `\n[${toolName} result truncated contiguously from ${content.length} chars. Read the next page or a narrower line range; no trailing source was included.]\n`;
+	return `${content.slice(0, Math.max(0, maxChars - marker.length))}${marker}`;
 };
 
 /**

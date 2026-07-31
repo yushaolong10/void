@@ -22,7 +22,7 @@ import { ToolName } from '../common/toolsServiceTypes.js';
 import { IMCPService } from '../common/mcpService.js';
 import { IAgentExtensionService } from './agent/AgentExtensionService.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
-import { computeReservedOutputTokens, computeTargetSummarizedRoundCount, CONTEXT_BUDGET_DEFAULTS, estimateTextTokens, reduceToolResultForSummary, stableTextHash, startsExternalConversationRound } from '../common/agent/context/ContextOptimization.js';
+import { computeReservedOutputTokens, computeTargetSummarizedRoundCount, CONTEXT_BUDGET_DEFAULTS, estimateTextTokens, reduceSourceResultForContext, reduceToolResultForSummary, stableTextHash, startsExternalConversationRound } from '../common/agent/context/ContextOptimization.js';
 
 export const EMPTY_MESSAGE = '(empty message)'
 
@@ -444,7 +444,9 @@ const fitWorkingMessages = (source: WorkingMessage[], maxChars: number): Working
 		if (totalChars() <= maxChars) break
 		if (message.role !== 'tool' || message.content.length <= 1_000) continue
 		const target = Math.max(1_000, message.content.length - (totalChars() - maxChars))
-		message.content = capMessageEdges(message.content, target, `${message.name} output`)
+		message.content = message.name === 'read_file'
+			? reduceSourceResultForContext(message.name, message.content, target)
+			: capMessageEdges(message.content, target, `${message.name} output`)
 	}
 
 	// Protect the latest user request. Older assistant prose can be reduced if a
@@ -1040,7 +1042,9 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 				parts.push(`Assistant: ${m.content}`)
 			} else if (m.role === 'tool') {
 				const params = JSON.stringify(m.rawParams)
-				const result = reduceToolResultForSummary(m.name, m.content)
+				const result = m.name === 'read_file'
+					? reduceSourceResultForContext(m.name, m.content, CONTEXT_BUDGET_DEFAULTS.toolResultMaxCharsForSummary)
+					: reduceToolResultForSummary(m.name, m.content)
 				parts.push(`Tool[${m.name}] params=${params}:\n${result}`)
 			}
 		}
@@ -1231,7 +1235,9 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 					simpleLLMMessages.push({
 						role: m.role,
 						contextMeta: m.contextMeta,
-							content: reduceToolResultForSummary(m.name, m.content, MAX_TOOL_RESULT_CONTEXT_CHARS),
+						content: m.name === 'read_file'
+							? reduceSourceResultForContext(m.name, m.content, MAX_TOOL_RESULT_CONTEXT_CHARS)
+							: reduceToolResultForSummary(m.name, m.content, MAX_TOOL_RESULT_CONTEXT_CHARS),
 						name: m.name,
 						id: m.id,
 						rawParams: m.rawParams,
