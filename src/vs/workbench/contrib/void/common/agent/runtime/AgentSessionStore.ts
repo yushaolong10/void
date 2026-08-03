@@ -138,6 +138,10 @@ export class InMemoryAgentSessionStore extends Disposable implements IAgentSessi
 				runs.set(event.runId, { ...existing, status: 'finished', summary: event.summary, finishedAt: event.finishedAt });
 				lastModified = Math.max(lastModified, event.finishedAt);
 			}
+			else if (event.type === 'run.cancelled') {
+				runs.set(event.runId, { ...existing, status: 'cancelled', error: event.reason, finishedAt: event.cancelledAt });
+				lastModified = Math.max(lastModified, event.cancelledAt);
+			}
 			else if (event.type === 'run.failed') {
 				runs.set(event.runId, { ...existing, status: 'failed', error: event.error, finishedAt: event.finishedAt });
 				lastModified = Math.max(lastModified, event.finishedAt);

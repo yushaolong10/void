@@ -9,6 +9,8 @@ import { PluginDefinition, PluginLoader } from '../../common/agent/extensions/Pl
 import { SkillDefinition, SkillLoader } from '../../common/agent/extensions/SkillLoader.js';
 import { ITerminalToolService } from '../terminalToolService.js';
 import { generateUuid } from '../../../../../base/common/uuid.js';
+import { IBrowserAgentBridge, createLegacyToolInvocation } from './BrowserAgentBridge.js';
+import { IVoidSettingsService } from '../../common/voidSettingsService.js';
 
 export interface IAgentExtensionService {
 	readonly _serviceBrand: undefined;
@@ -33,6 +35,8 @@ export class AgentExtensionService extends Disposable implements IAgentExtension
 		@IWorkspaceContextService private readonly workspaceContextService: IWorkspaceContextService,
 		@IFileService private readonly fileService: IFileService,
 		@ITerminalToolService private readonly terminalToolService: ITerminalToolService,
+		@IBrowserAgentBridge private readonly agentBridge: IBrowserAgentBridge,
+		@IVoidSettingsService private readonly settingsService: IVoidSettingsService,
 	) {
 		super();
 		this.reload();
@@ -65,6 +69,16 @@ export class AgentExtensionService extends Disposable implements IAgentExtension
 		await this.hookRunner.run(context);
 		for (const hook of this.hookRunner.listDefinitions()) {
 			if (hook.event !== context.event || !hook.command) continue;
+			const invocation = createLegacyToolInvocation('run_command', { command: hook.command, cwd: hook.cwd ?? null });
+			const permission = await this.agentBridge.runtime.decidePermission(invocation, {
+				workspaceRoots: this.workspaceContextService.getWorkspace().folders.map(folder => folder.uri.fsPath),
+			});
+			const autoApproved = permission.type === 'ask'
+				&& permission.allowAutoApprove === true
+				&& !!this.settingsService.state.globalSettings.autoApprove.terminal;
+			if (permission.type !== 'allow' && !autoApproved) {
+				throw new Error(`Hook "${hook.id}" was blocked by the permission policy: ${permission.reason}`);
+			}
 			const { resPromise } = await this.terminalToolService.runCommand(hook.command, {
 				type: 'temporary',
 				cwd: hook.cwd ?? null,

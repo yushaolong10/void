@@ -1,7 +1,7 @@
 import { Emitter, Event } from '../../../../../../base/common/event.js';
 import { Disposable } from '../../../../../../base/common/lifecycle.js';
 import { generateUuid } from '../../../../../../base/common/uuid.js';
-import { PermissionEngine } from '../permissions/PermissionEngine.js';
+import { PermissionEngine, PermissionEvaluationContext } from '../permissions/PermissionEngine.js';
 import { ToolInvocation } from '../tools/ToolInvocation.js';
 import { AgentEvent } from './AgentEvent.js';
 import { AgentRun } from './AgentRun.js';
@@ -32,12 +32,16 @@ export class AgentRuntime extends Disposable {
 		return run;
 	}
 
-	async decidePermission(call: ToolInvocation) {
-		return this.permissions.decide(call);
+	async decidePermission(call: ToolInvocation, context?: PermissionEvaluationContext) {
+		return this.permissions.decide(call, context);
 	}
 
 	finishRun(sessionId: AgentSessionId, runId: AgentRunId, summary: string): void {
 		this.emit({ type: 'run.finished', sessionId, runId, summary, finishedAt: Date.now() });
+	}
+
+	cancelRun(sessionId: AgentSessionId, runId: AgentRunId, reason: string): void {
+		this.emit({ type: 'run.cancelled', sessionId, runId, reason, cancelledAt: Date.now() });
 	}
 
 	failRun(sessionId: AgentSessionId, runId: AgentRunId, error: string): void {

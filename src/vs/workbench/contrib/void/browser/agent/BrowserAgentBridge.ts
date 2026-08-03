@@ -77,6 +77,7 @@ export class BrowserAgentBridge extends Disposable implements IBrowserAgentBridg
 			type: 'permission.required',
 			sessionId: ctx.sessionId,
 			runId: ctx.runId,
+			callId,
 			decision,
 		});
 	}
@@ -113,11 +114,12 @@ export class BrowserAgentBridge extends Disposable implements IBrowserAgentBridg
 	}
 }
 
-export const createLegacyToolInvocation = (name: string, input: unknown, rawInput?: unknown): ToolInvocation => ({
+export const createLegacyToolInvocation = (name: string, input: unknown, rawInput?: unknown, mcpServerName?: string): ToolInvocation => ({
 	callId: generateUuid(),
 	name,
 	input,
 	rawInput,
+	mcpServerName,
 });
 
 registerSingleton(IBrowserAgentBridge, BrowserAgentBridge, InstantiationType.Eager);

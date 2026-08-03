@@ -13,7 +13,7 @@ export type AgentEvent =
 	| { type: 'plan.step.blocked'; sessionId: AgentSessionId; runId: AgentRunId; step: ExecutionPlanStep; reason: string; blockedAt: number }
 	| { type: 'model.delta'; sessionId: AgentSessionId; runId: AgentRunId; text: string }
 	| { type: 'tool.requested'; sessionId: AgentSessionId; runId: AgentRunId; call: ToolInvocation }
-	| { type: 'permission.required'; sessionId: AgentSessionId; runId: AgentRunId; decision: PermissionDecision }
+	| { type: 'permission.required'; sessionId: AgentSessionId; runId: AgentRunId; callId: string; decision: PermissionDecision }
 	| { type: 'permission.resolved'; sessionId: AgentSessionId; runId: AgentRunId; callId: string; decision: PermissionDecision }
 	| { type: 'tool.started'; sessionId: AgentSessionId; runId: AgentRunId; call: ToolInvocation; startedAt: number }
 	| { type: 'tool.finished'; sessionId: AgentSessionId; runId: AgentRunId; callId: string; result: ToolResult; finishedAt: number }
@@ -21,6 +21,7 @@ export type AgentEvent =
 	| { type: 'file.patch.proposed'; sessionId: AgentSessionId; runId: AgentRunId; uri: URI; patchId: string }
 	| { type: 'checkpoint.created'; sessionId: AgentSessionId; runId: AgentRunId; checkpointId: string }
 	| { type: 'run.finished'; sessionId: AgentSessionId; runId: AgentRunId; summary: string; finishedAt: number }
+	| { type: 'run.cancelled'; sessionId: AgentSessionId; runId: AgentRunId; reason: string; cancelledAt: number }
 	| { type: 'run.failed'; sessionId: AgentSessionId; runId: AgentRunId; error: string; finishedAt: number };
 
 export type AgentEventType = AgentEvent['type'];

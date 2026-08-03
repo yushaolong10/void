@@ -42,6 +42,10 @@ export const toAgentRunViewModel = (events: readonly AgentEvent[]): AgentRunView
 			status = 'finished';
 			items.push({ kind: event.type, title: 'Run finished', detail: event.summary, timestamp: event.finishedAt });
 		}
+		else if (event.type === 'run.cancelled') {
+			status = 'cancelled';
+			items.push({ kind: event.type, title: 'Run cancelled', detail: event.reason, timestamp: event.cancelledAt });
+		}
 		else if (event.type === 'run.failed') {
 			status = 'failed';
 			items.push({ kind: event.type, title: 'Run failed', detail: event.error, timestamp: event.finishedAt });

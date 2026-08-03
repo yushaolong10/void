@@ -40,11 +40,77 @@ const executeTools = new Set<string>([
 	'git_worktree_create',
 ]);
 
+const pathValues = (input: unknown): string[] => {
+	if (!input || typeof input !== 'object') return [];
+	const record = input as Record<string, unknown>;
+	return ['uri', 'path']
+		.map(key => record[key])
+		.map(value => {
+			if (typeof value === 'string') return value;
+			if (value && typeof value === 'object' && 'fsPath' in value && typeof (value as { fsPath?: unknown }).fsPath === 'string') {
+				return (value as { fsPath: string }).fsPath;
+			}
+			return '';
+		})
+		.filter(Boolean);
+};
+
+const escapeRegExp = (value: string): string => value.replace(/[|\\{}()[\]^$+?.]/g, '\\$&');
+
+const globRegExp = (glob: string): RegExp => {
+	const normalized = glob.replace(/\\/g, '/');
+	let pattern = '';
+	for (let index = 0; index < normalized.length; index++) {
+		const char = normalized[index];
+		if (char === '*' && normalized[index + 1] === '*') {
+			if (normalized[index + 2] === '/') {
+				pattern += '(?:.*/)?';
+				index += 2;
+			}
+			else {
+				pattern += '.*';
+				index++;
+			}
+		}
+		else if (char === '*') pattern += '[^/]*';
+		else if (char === '?') pattern += '[^/]';
+		else pattern += escapeRegExp(char);
+	}
+	return new RegExp(`^(?:${pattern}|.*/${pattern})$`, 'i');
+};
+
+export const matchesProtectedPath = (path: string, globs: readonly string[]): boolean => {
+	const normalized = path.replace(/\\/g, '/').replace(/\/$/, '');
+	return globs.some(glob => globRegExp(glob).test(normalized));
+};
+
+export const isWriteToolName = (toolName: string): boolean => writeTools.has(toolName)
+	|| toolName === 'delete_file_or_folder'
+	|| toolName === 'git_commit'
+	|| toolName === 'git_create_branch'
+	|| toolName === 'git_worktree_create'
+	|| toolName === 'git_worktree_delete';
+
+export const isNetworkToolCall = (toolName: string, input: unknown, mcpServerName?: string): boolean => {
+	if (mcpServerName || toolName === 'mcp_call_tool' || toolName === 'install_dependencies') return true;
+	if (toolName !== 'run_command' && toolName !== 'run_persistent_command' && toolName !== 'run_tests') return false;
+	const command = typeof input === 'object' && input && 'command' in input
+		? String((input as { command?: unknown }).command ?? '')
+		: String(input ?? '');
+	return /\b(curl|wget|ssh|scp|rsync|nc|ncat|telnet)\b/i.test(command)
+		|| /\b(npm|pnpm|yarn|bun|pip|pip3|uv|poetry|cargo|go)\s+(install|add|update|upgrade|get)\b/i.test(command);
+};
+
 export class RiskClassifier {
-	classify(toolName: ToolName, input: unknown): RiskLevel {
+	classify(toolName: ToolName, input: unknown, protectedPathGlobs: readonly string[] = []): RiskLevel {
 		if (readTools.has(toolName)) return 'low';
-		if (writeTools.has(toolName)) return this._mentionsProtectedPath(input) ? 'high' : 'medium';
-		if (toolName === 'delete_file_or_folder') return 'critical';
+		if (writeTools.has(toolName)) return this._mentionsProtectedPath(input, protectedPathGlobs) ? 'high' : 'medium';
+		if (toolName === 'delete_file_or_folder') {
+			const params = input && typeof input === 'object'
+				? input as { isFolder?: unknown; isRecursive?: unknown }
+				: {};
+			return params.isFolder === true || params.isRecursive === true ? 'critical' : 'high';
+		}
 		if (toolName === 'run_command' || toolName === 'run_persistent_command') return this._classifyTerminalCommand(input);
 		if (toolName === 'git_commit' || toolName === 'git_create_branch') return 'medium';
 		if (toolName === 'git_worktree_delete' || toolName === 'git_push') return 'high';
@@ -53,7 +119,8 @@ export class RiskClassifier {
 		return 'medium';
 	}
 
-	private _mentionsProtectedPath(input: unknown): boolean {
+	private _mentionsProtectedPath(input: unknown, protectedPathGlobs: readonly string[]): boolean {
+		if (protectedPathGlobs.length && pathValues(input).some(path => matchesProtectedPath(path, protectedPathGlobs))) return true;
 		const value = safeStringify(input ?? '').toLowerCase();
 		return value.includes('.env') || value.includes('/.ssh/') || value.includes('token') || value.includes('secret');
 	}
@@ -67,6 +134,7 @@ export class RiskClassifier {
 		const command = this._extractCommand(input);
 		if (!command) return 'high';
 		const normalized = command.toLowerCase();
+		const hasShellControlOperator = /(?:&&|\|\||[;|&<>\n\r])/.test(normalized);
 
 		if (
 			/\brm\s+-rf\b/.test(normalized)
@@ -89,10 +157,10 @@ export class RiskClassifier {
 			return 'high';
 		}
 
-		if (
+		if (!hasShellControlOperator && (
 			/^\s*git\s+(status|diff|show|log|branch\s+(--show-current|-vv?)?|rev-parse|ls-files)\b/.test(normalized)
 			|| /^\s*(rg|grep|sed|awk|cat|head|tail|ls|find|pwd|wc)\b/.test(normalized)
-		) {
+		)) {
 			return 'low';
 		}
 

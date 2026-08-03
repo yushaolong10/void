@@ -1,8 +1,50 @@
 import { ToolInvocation } from '../tools/ToolInvocation.js';
 import { PermissionDecision } from './PermissionDecision.js';
 import { defaultPermissionPolicy, PermissionPolicy } from './PermissionPolicy.js';
-import { RiskClassifier } from './RiskClassifier.js';
+import { isNetworkToolCall, isWriteToolName, matchesProtectedPath, RiskClassifier } from './RiskClassifier.js';
 import { safeStringify } from '../tools/safeSerialize.js';
+
+export interface PermissionEvaluationContext {
+	readonly workspaceRoots?: readonly string[];
+}
+
+const normalizePath = (value: string): string => {
+	const slashPath = value.replace(/\\/g, '/');
+	const prefix = slashPath.startsWith('/') ? '/' : '';
+	const parts: string[] = [];
+	for (const part of slashPath.split('/')) {
+		if (!part || part === '.') continue;
+		if (part === '..') parts.pop();
+		else parts.push(part);
+	}
+	return `${prefix}${parts.join('/')}`.replace(/\/$/, '');
+};
+
+const stringPath = (value: unknown): string | undefined => {
+	if (typeof value === 'string') return value;
+	if (value && typeof value === 'object' && 'fsPath' in value && typeof (value as { fsPath?: unknown }).fsPath === 'string') {
+		return (value as { fsPath: string }).fsPath;
+	}
+	return undefined;
+};
+
+const affectedPaths = (call: ToolInvocation): string[] => {
+	if (!call.input || typeof call.input !== 'object') return [];
+	const input = call.input as Record<string, unknown>;
+	const directPaths = [stringPath(input.uri), stringPath(input.path)].filter((path): path is string => !!path);
+	if (directPaths.length) return directPaths;
+	if (isWriteToolName(call.name)) {
+		const cwd = stringPath(input.cwd);
+		if (cwd) return [cwd];
+	}
+	return [];
+};
+
+const isWithinRoot = (path: string, root: string): boolean => {
+	const normalizedPath = normalizePath(path);
+	const normalizedRoot = normalizePath(root);
+	return normalizedPath === normalizedRoot || normalizedPath.startsWith(`${normalizedRoot}/`);
+};
 
 export class PermissionEngine {
 	constructor(
@@ -10,8 +52,9 @@ export class PermissionEngine {
 		private readonly riskClassifier = new RiskClassifier(),
 	) { }
 
-	async decide(call: ToolInvocation): Promise<PermissionDecision> {
-		const risk = this.riskClassifier.classify(call.name, call.input);
+	async decide(call: ToolInvocation, context: PermissionEvaluationContext = {}): Promise<PermissionDecision> {
+		const protectedPathGlobs = this.policy.protectedPathGlobs ?? [];
+		const risk = this.riskClassifier.classify(call.name, call.input, protectedPathGlobs);
 
 		if (this.policy.mode === 'dangerous-skip-approval') {
 			return { type: 'allow', reason: 'Dangerous skip approval mode is enabled.' };
@@ -21,12 +64,28 @@ export class PermissionEngine {
 			return { type: 'deny', reason: 'Tool calls are disabled in chat-only mode.' };
 		}
 
-		if (risk === 'low') {
-			return { type: 'allow', reason: 'Read-only tool calls are allowed.' };
+		if (this.policy.mode === 'read-only' && risk !== 'low') {
+			return { type: 'deny', reason: 'This permission mode only allows read-only tools.' };
 		}
 
-		if (this.policy.mode === 'read-only') {
-			return { type: 'deny', reason: 'This permission mode only allows read-only tools.' };
+		if (this._isAllowlistedCommand(call)) {
+			return { type: 'allow', reason: 'The exact command is allowed by the permission policy.' };
+		}
+
+		const policyReviewReason = this._policyReviewReason(call, context);
+		if (policyReviewReason) {
+			return {
+				type: 'ask',
+				reason: policyReviewReason,
+				risk,
+				preview: this._previewForDecision(call, risk),
+				allowAutoApprove: risk !== 'critical',
+				allowRemember: false,
+			};
+		}
+
+		if (risk === 'low') {
+			return { type: 'allow', reason: 'Read-only tool calls are allowed.' };
 		}
 
 		if (risk === 'medium' && (this.policy.mode === 'auto-edit' || this.policy.mode === 'workspace-auto')) {
@@ -38,7 +97,38 @@ export class PermissionEngine {
 			reason: this._reasonForDecision(call.name, risk),
 			risk,
 			preview: this._previewForDecision(call, risk),
+			allowAutoApprove: risk !== 'critical',
+			allowRemember: risk === 'medium',
 		};
+	}
+
+	private _isAllowlistedCommand(call: ToolInvocation): boolean {
+		if (call.name !== 'run_command' && call.name !== 'run_tests' && call.name !== 'run_persistent_command') return false;
+		if (!call.input || typeof call.input !== 'object') return false;
+		const command = (call.input as { command?: unknown }).command;
+		if (typeof command !== 'string') return false;
+		const normalized = command.trim().replace(/\s+/g, ' ');
+		return (this.policy.commandAllowlist ?? []).some(allowed => allowed.trim().replace(/\s+/g, ' ') === normalized);
+	}
+
+	private _policyReviewReason(call: ToolInvocation, context: PermissionEvaluationContext): string | undefined {
+		const paths = affectedPaths(call);
+		if (paths.some(path => matchesProtectedPath(path, this.policy.protectedPathGlobs ?? []))) {
+			return `Tool "${call.name}" targets a protected path and requires permission-policy review.`;
+		}
+		if (isWriteToolName(call.name)) {
+			if (this.policy.allowWorkspaceWrites === false) {
+				return 'Workspace writes require permission-policy review.';
+			}
+			const roots = context.workspaceRoots ?? [];
+			if (roots.length && paths.some(path => !roots.some(root => isWithinRoot(path, root)))) {
+				return `Tool "${call.name}" writes outside the current workspace and requires permission-policy review.`;
+			}
+		}
+		if (!this.policy.allowNetwork && isNetworkToolCall(call.name, call.input, call.mcpServerName)) {
+			return `Network access for tool "${call.name}" requires permission-policy review.`;
+		}
+		return undefined;
 	}
 
 	private _reasonForDecision(toolName: string, risk: string): string {

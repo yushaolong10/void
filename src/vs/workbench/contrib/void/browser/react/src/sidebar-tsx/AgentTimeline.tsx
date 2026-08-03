@@ -36,6 +36,7 @@ const eventTitle = (event: AgentEvent) => {
 	if (event.type === 'tool.failed') return `Failed ${event.callId.slice(0, 8)}`
 	if (event.type === 'checkpoint.created') return 'Checkpoint'
 	if (event.type === 'run.finished') return 'Run finished'
+	if (event.type === 'run.cancelled') return 'Run cancelled'
 	if (event.type === 'run.failed') return 'Run failed'
 	return event.type
 }
@@ -57,6 +58,7 @@ const eventDetail = (event: AgentEvent) => {
 	if (event.type === 'tool.failed') return event.error
 	if (event.type === 'checkpoint.created') return event.checkpointId
 	if (event.type === 'run.finished') return event.summary
+	if (event.type === 'run.cancelled') return event.reason
 	if (event.type === 'run.failed') return event.error
 	return ''
 }

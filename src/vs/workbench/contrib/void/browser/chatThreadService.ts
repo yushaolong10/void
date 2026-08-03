@@ -693,11 +693,20 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 		else return
 
 		const { name, id, rawParams, mcpServerName } = lastMsg
+		const pendingInvocation = this._pendingAgentToolInvocationOfChatToolId.get(id)
+		if (pendingInvocation) {
+			this._agentBridge.recordPermissionResolved(
+				pendingInvocation.invocation.callId,
+				{ type: 'deny', reason: this.toolErrMsgs.rejected },
+				pendingInvocation.ctx,
+			)
+			this._pendingAgentToolInvocationOfChatToolId.delete(id)
+		}
 
 		const errorMessage = this.toolErrMsgs.rejected
 		this._updateLatestTool(threadId, { role: 'tool', type: 'rejected', params: params, name: name, content: errorMessage, result: null, id, rawParams, mcpServerName })
 		this._setStreamState(threadId, undefined)
-		this._finishAgentRun(threadId, 'Agent run stopped because a tool request was rejected.')
+		this._cancelAgentRun(threadId, 'Agent run stopped because a tool request was rejected.')
 	}
 
 	private _computeMCPServerOfToolName = (toolName: string) => {
@@ -744,6 +753,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 
 
 		this._setStreamState(threadId, undefined)
+		this._cancelAgentRun(threadId, 'Agent run was cancelled by the user.')
 	}
 
 
@@ -761,7 +771,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 	private _exclusiveToolWriteLock: Promise<void> = Promise.resolve()
 	private readonly _agentRunOfThreadId = new Map<string, AgentRun>()
 	private readonly _agentBudgetOfThreadId = new Map<string, AgentRunBudget>()
-	private readonly _pendingAgentToolInvocationOfChatToolId = new Map<string, { invocation: ReturnType<typeof createLegacyToolInvocation>; ctx: ToolContext }>()
+	private readonly _pendingAgentToolInvocationOfChatToolId = new Map<string, { invocation: ReturnType<typeof createLegacyToolInvocation>; ctx: ToolContext; allowRemember: boolean }>()
 	private readonly _rememberedPermissionApprovalKeysByThreadId = new Map<string, Set<string>>()
 
 
@@ -872,22 +882,41 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 		return { sessionId: threadId, runId: run.runId }
 	}
 
+	private _permissionEvaluationContext() {
+		return {
+			workspaceRoots: this._workspaceContextService.getWorkspace().folders.map(folder => folder.uri.fsPath),
+		}
+	}
+
+	private _clearAgentRunState(threadId: string): void {
+		this._agentRunOfThreadId.delete(threadId)
+		this._agentBudgetOfThreadId.delete(threadId)
+		this._compressionAbortedThreadIds.delete(threadId)
+		this._rememberedPermissionApprovalKeysByThreadId.delete(threadId)
+		for (const [toolId, pending] of this._pendingAgentToolInvocationOfChatToolId) {
+			if (pending.ctx.sessionId === threadId) this._pendingAgentToolInvocationOfChatToolId.delete(toolId)
+		}
+	}
+
 	private _finishAgentRun(threadId: string, summary: string): void {
 		const run = this._agentRunOfThreadId.get(threadId)
 		if (!run) return
 		this._agentBridge.runtime.finishRun(threadId, run.runId, summary)
-		this._agentRunOfThreadId.delete(threadId)
-		this._agentBudgetOfThreadId.delete(threadId)
-		this._compressionAbortedThreadIds.delete(threadId)
+		this._clearAgentRunState(threadId)
+	}
+
+	private _cancelAgentRun(threadId: string, reason: string): void {
+		const run = this._agentRunOfThreadId.get(threadId)
+		if (!run) return
+		this._agentBridge.runtime.cancelRun(threadId, run.runId, reason)
+		this._clearAgentRunState(threadId)
 	}
 
 	private _failAgentRun(threadId: string, error: string): void {
 		const run = this._agentRunOfThreadId.get(threadId)
 		if (!run) return
 		this._agentBridge.runtime.failRun(threadId, run.runId, error)
-		this._agentRunOfThreadId.delete(threadId)
-		this._agentBudgetOfThreadId.delete(threadId)
-		this._compressionAbortedThreadIds.delete(threadId)
+		this._clearAgentRunState(threadId)
 		this._runAgentHookSafely({ event: 'on_run_failed', metadata: { threadId, error } })
 	}
 
@@ -895,8 +924,9 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 		try {
 			await this._agentExtensionService.runHook(context)
 		}
-		catch {
-			// Hooks are user automation; failures should not corrupt the agent control flow.
+		catch (error) {
+			// Hooks are user automation; report failures without corrupting agent control flow.
+			this._notificationService.warn(`Agent hook failed: ${getErrorMessage(error)}`)
 		}
 	}
 
@@ -928,7 +958,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 	private _canAutoApprovePermissionDecision(decision: PermissionDecision): boolean {
 		if (decision.type === 'allow') return true
 		if (decision.type === 'deny') return false
-		return decision.risk !== 'critical' // 仅 critical 需要手动审批
+		return decision.allowAutoApprove ?? decision.risk === 'medium'
 	}
 
 	private _permissionRequestContent(decision: PermissionDecision): string {
@@ -1245,7 +1275,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 		let toolParams: ToolCallParams<ToolName>
 		let toolResult: ToolResult<ToolName>
 		let toolResultStr: string
-		let toolInvocation = createLegacyToolInvocation(toolName, opts.unvalidatedToolParams)
+		let toolInvocation = createLegacyToolInvocation(toolName, opts.unvalidatedToolParams, undefined, mcpServerName)
 		const toolCtx = this._agentToolContext(threadId)
 
 		// Check if it's a built-in tool
@@ -1280,9 +1310,9 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 				if (toolName === 'edit_file') { this._addToolEditCheckpoint({ threadId, uri: (toolParams as BuiltinToolCallParams['edit_file']).uri }) }
 				if (toolName === 'rewrite_file') { this._addToolEditCheckpoint({ threadId, uri: (toolParams as BuiltinToolCallParams['rewrite_file']).uri }) }
 
-				toolInvocation = createLegacyToolInvocation(toolName, toolParams, opts.unvalidatedToolParams)
+				toolInvocation = createLegacyToolInvocation(toolName, toolParams, opts.unvalidatedToolParams, mcpServerName)
 				this._agentBridge.recordToolRequested(toolInvocation, toolCtx)
-				const permissionDecision = await this._agentBridge.runtime.decidePermission(toolInvocation)
+				const permissionDecision = await this._agentBridge.runtime.decidePermission(toolInvocation, this._permissionEvaluationContext())
 				if (permissionDecision.type === 'deny') {
 					this._agentBridge.recordPermissionResolved(toolInvocation.callId, permissionDecision, toolCtx)
 					this._updateLatestTool(threadId, { role: 'tool', type: 'rejected', params: toolParams, result: null, name: toolName, content: permissionDecision.reason, id: toolId, rawParams: opts.unvalidatedToolParams, mcpServerName })
@@ -1293,7 +1323,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 
 				const approvalType = isBuiltInTool ? approvalTypeOfBuiltinToolName[toolName] : 'MCP tools'
 				if (permissionDecision.type === 'ask' || approvalType) {
-					if (permissionDecision.type === 'ask' && this._hasRememberedPermissionApproval(threadId, toolName, toolParams)) {
+					if (permissionDecision.type === 'ask' && permissionDecision.allowRemember !== false && this._hasRememberedPermissionApproval(threadId, toolName, toolParams)) {
 						this._agentBridge.recordPermissionResolved(toolInvocation.callId, { type: 'allow', reason: `A similar ${permissionDecision.risk}-risk "${toolName}" action was already approved in this thread.` }, toolCtx)
 					}
 					else {
@@ -1302,7 +1332,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 						// add a tool_request because we use it for UI if a tool is loading (this should be improved in the future)
 						this._addMessageToThread(threadId, { role: 'tool', type: 'tool_request', content: this._permissionRequestContent(permissionDecision), result: null, name: toolName, params: toolParams, id: toolId, rawParams: opts.unvalidatedToolParams, mcpServerName })
 						if (permissionDecision.type === 'ask' && !canAutoApprove) {
-							this._pendingAgentToolInvocationOfChatToolId.set(toolId, { invocation: toolInvocation, ctx: toolCtx })
+							this._pendingAgentToolInvocationOfChatToolId.set(toolId, { invocation: toolInvocation, ctx: toolCtx, allowRemember: permissionDecision.allowRemember !== false })
 							this._agentBridge.recordPermissionRequired(toolInvocation.callId, permissionDecision, toolCtx)
 							return { awaitingUserApproval: true }
 						}
@@ -1321,10 +1351,10 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 					this._pendingAgentToolInvocationOfChatToolId.delete(toolId)
 				}
 				else {
-					toolInvocation = createLegacyToolInvocation(toolName, toolParams, opts.unvalidatedToolParams)
+					toolInvocation = createLegacyToolInvocation(toolName, toolParams, opts.unvalidatedToolParams, mcpServerName)
 					this._agentBridge.recordToolRequested(toolInvocation, toolCtx)
 				}
-				this._rememberPermissionApproval(threadId, toolName, toolParams)
+				if (pendingInvocation?.allowRemember ?? true) this._rememberPermissionApproval(threadId, toolName, toolParams)
 				this._agentBridge.recordPermissionResolved(toolInvocation.callId, { type: 'allow', reason: `Tool "${toolName}" was approved by the user.` }, toolCtx)
 			}
 
