@@ -119,6 +119,23 @@ suite('Void permission engine', () => {
 		}
 	});
 
+	test('dangerous skip mode bypasses every approval and deny decision', async () => {
+		const engine = new PermissionEngine(policy({ mode: 'read-only' }));
+		const context = {
+			workspaceRoots: ['/workspace/project'],
+			dangerouslySkipAllApprovals: true,
+		};
+		for (const call of [
+			invocation('delete_file_or_folder', { uri: URI.file('/outside/project'), isFolder: true, isRecursive: true }),
+			invocation('run_command', { command: 'rm -rf /tmp/example' }),
+			invocation('remote_tool', {}, 'server'),
+		]) {
+			const decision = await engine.decide(call, context);
+			assert.strictEqual(decision.type, 'allow');
+			assert.match(decision.reason, /skip approval mode/i);
+		}
+	});
+
 	test('records cancellation as a terminal run state', () => {
 		const runtime = new AgentRuntime();
 		const run = runtime.startRun({ sessionId: 'session', goal: 'goal' });

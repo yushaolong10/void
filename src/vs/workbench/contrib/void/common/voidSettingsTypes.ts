@@ -480,6 +480,7 @@ export type GlobalSettings = {
 	enableFastApply: boolean;
 	chatMode: ChatMode;
 	autoApprove: { [approvalType in ToolApprovalType]?: boolean };
+	dangerouslySkipAllApprovals: boolean;
 	showInlineSuggestions: boolean;
 	includeToolLintErrors: boolean;
 	parallelReadonlyTools: boolean;
@@ -498,6 +499,7 @@ export const defaultGlobalSettings: GlobalSettings = {
 	enableFastApply: true,
 	chatMode: 'agent',
 	autoApprove: { edits: true, terminal: true },
+	dangerouslySkipAllApprovals: false,
 	showInlineSuggestions: true,
 	includeToolLintErrors: true,
 	parallelReadonlyTools: true,

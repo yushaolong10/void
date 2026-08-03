@@ -283,6 +283,7 @@ class VoidSettingsService extends Disposable implements IVoidSettingsService {
 
 			// autoapprove is now an obj not a boolean (1.2.5)
 			if (typeof readS.globalSettings.autoApprove === 'boolean') readS.globalSettings.autoApprove = {}
+			if (readS.globalSettings.dangerouslySkipAllApprovals === undefined) readS.globalSettings.dangerouslySkipAllApprovals = false
 
 			// 1.3.5 add source control feature
 			if (readS.modelSelectionOfFeature && !readS.modelSelectionOfFeature['SCM']) {

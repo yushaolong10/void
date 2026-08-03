@@ -38,7 +38,10 @@ async function getElectron() {
     await runProcess(npm, ['run', 'electron']);
 }
 async function ensureCompiled() {
-    if (!(await exists('out'))) {
+    // A partial TypeScript emit can create `out/` without producing the Electron
+    // entrypoint. Check the actual application entry so launch never mistakes an
+    // incomplete output directory for a successful workbench build.
+    if (!(await exists('out/main.js'))) {
         await runProcess(npm, ['run', 'compile']);
     }
 }

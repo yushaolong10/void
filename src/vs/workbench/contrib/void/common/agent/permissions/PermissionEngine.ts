@@ -6,6 +6,7 @@ import { safeStringify } from '../tools/safeSerialize.js';
 
 export interface PermissionEvaluationContext {
 	readonly workspaceRoots?: readonly string[];
+	readonly dangerouslySkipAllApprovals?: boolean;
 }
 
 const normalizePath = (value: string): string => {
@@ -56,7 +57,7 @@ export class PermissionEngine {
 		const protectedPathGlobs = this.policy.protectedPathGlobs ?? [];
 		const risk = this.riskClassifier.classify(call.name, call.input, protectedPathGlobs);
 
-		if (this.policy.mode === 'dangerous-skip-approval') {
+		if (context.dangerouslySkipAllApprovals || this.policy.mode === 'dangerous-skip-approval') {
 			return { type: 'allow', reason: 'Dangerous skip approval mode is enabled.' };
 		}
 

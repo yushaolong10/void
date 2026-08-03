@@ -72,6 +72,7 @@ export class AgentExtensionService extends Disposable implements IAgentExtension
 			const invocation = createLegacyToolInvocation('run_command', { command: hook.command, cwd: hook.cwd ?? null });
 			const permission = await this.agentBridge.runtime.decidePermission(invocation, {
 				workspaceRoots: this.workspaceContextService.getWorkspace().folders.map(folder => folder.uri.fsPath),
+				dangerouslySkipAllApprovals: this.settingsService.state.globalSettings.dangerouslySkipAllApprovals,
 			});
 			const autoApproved = permission.type === 'ask'
 				&& permission.allowAutoApprove === true

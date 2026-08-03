@@ -885,6 +885,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 	private _permissionEvaluationContext() {
 		return {
 			workspaceRoots: this._workspaceContextService.getWorkspace().folders.map(folder => folder.uri.fsPath),
+			dangerouslySkipAllApprovals: this._settingsService.state.globalSettings.dangerouslySkipAllApprovals,
 		}
 	}
 
@@ -1322,7 +1323,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 				// 2. if tool requires approval, break from the loop, awaiting approval
 
 				const approvalType = isBuiltInTool ? approvalTypeOfBuiltinToolName[toolName] : 'MCP tools'
-				if (permissionDecision.type === 'ask' || approvalType) {
+				if (permissionDecision.type === 'ask' || (approvalType && !this._settingsService.state.globalSettings.dangerouslySkipAllApprovals)) {
 					if (permissionDecision.type === 'ask' && permissionDecision.allowRemember !== false && this._hasRememberedPermissionApproval(threadId, toolName, toolParams)) {
 						this._agentBridge.recordPermissionResolved(toolInvocation.callId, { type: 'allow', reason: `A similar ${permissionDecision.risk}-risk "${toolName}" action was already approved in this thread.` }, toolCtx)
 					}

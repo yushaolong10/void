@@ -882,7 +882,7 @@ const RedoOnboardingButton = ({ className }: { className?: string }) => {
 
 
 
-export const ToolApprovalTypeSwitch = ({ approvalType, size, desc }: { approvalType: ToolApprovalType, size: "xxs" | "xs" | "sm" | "sm+" | "md", desc: string }) => {
+export const ToolApprovalTypeSwitch = ({ approvalType, size, desc, disabled = false }: { approvalType: ToolApprovalType, size: "xxs" | "xs" | "sm" | "sm+" | "md", desc: string, disabled?: boolean }) => {
 	const accessor = useAccessor()
 	const voidSettingsService = accessor.get('IVoidSettingsService')
 	const voidSettingsState = useSettingsState()
@@ -901,9 +901,53 @@ export const ToolApprovalTypeSwitch = ({ approvalType, size, desc }: { approvalT
 			size={size}
 			value={voidSettingsState.globalSettings.autoApprove[approvalType] ?? false}
 			onChange={(newVal) => onToggleAutoApprove(approvalType, newVal)}
+			disabled={disabled}
 		/>
-		<span className="text-void-fg-3 text-xs">{desc}</span>
+		<span className={`text-void-fg-3 text-xs ${disabled ? 'opacity-40' : ''}`}>{desc}</span>
 	</>
+}
+
+const DangerousSkipAllApprovalsSwitch = () => {
+	const accessor = useAccessor()
+	const voidSettingsService = accessor.get('IVoidSettingsService')
+	const settingsState = useSettingsState()
+	const metricsService = accessor.get('IMetricsService')
+	const [confirming, setConfirming] = useState(false)
+	const enabled = settingsState.globalSettings.dangerouslySkipAllApprovals
+
+	const setEnabled = useCallback((value: boolean) => {
+		voidSettingsService.setGlobalSetting('dangerouslySkipAllApprovals', value)
+		metricsService.capture('Dangerous Skip All Approvals Toggle', { enabled: value })
+		setConfirming(false)
+	}, [metricsService, voidSettingsService])
+
+	return <div className={`my-2 rounded border px-3 py-2 ${enabled ? 'border-red-500/70 bg-red-500/10' : 'border-void-border-3'}`}>
+		<div className='flex items-center gap-x-2'>
+			<VoidSwitch
+				size='xs'
+				value={enabled}
+				onChange={value => value ? setConfirming(true) : setEnabled(false)}
+			/>
+			<span className={`text-xs font-medium ${enabled ? 'text-red-400' : 'text-void-fg-2'}`}>Allow all operations without approval</span>
+		</div>
+		<div className='mt-1 text-xs text-void-fg-3'>Includes critical terminal commands, recursive deletion, MCP/network access, workspace-external writes, and hooks.</div>
+		{confirming && !enabled ? <div className='mt-2 flex items-center gap-2'>
+			<button
+				type='button'
+				className='rounded bg-red-600 px-2 py-1 text-xs font-medium text-white hover:bg-red-500'
+				onClick={() => setEnabled(true)}
+			>
+				Enable full access
+			</button>
+			<button
+				type='button'
+				className='rounded border border-void-border-3 px-2 py-1 text-xs text-void-fg-2 hover:bg-void-bg-3'
+				onClick={() => setConfirming(false)}
+			>
+				Cancel
+			</button>
+		</div> : null}
+	</div>
 }
 
 
@@ -1332,9 +1376,10 @@ export const Settings = () => {
 											<div className='my-2'>
 												{/* Auto Accept Switch */}
 												<ErrorBoundary>
+													<DangerousSkipAllApprovalsSwitch />
 													{[...toolApprovalTypes].map((approvalType) => {
 														return <div key={approvalType} className="flex items-center gap-x-2 my-2">
-															<ToolApprovalTypeSwitch size='xs' approvalType={approvalType} desc={`Auto-approve ${approvalType}`} />
+															<ToolApprovalTypeSwitch size='xs' approvalType={approvalType} desc={`Auto-approve ${approvalType}`} disabled={settingsState.globalSettings.dangerouslySkipAllApprovals} />
 														</div>
 													})}
 
