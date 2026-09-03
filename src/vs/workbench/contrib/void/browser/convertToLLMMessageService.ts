@@ -22,7 +22,7 @@ import { ToolName } from '../common/toolsServiceTypes.js';
 import { IMCPService } from '../common/mcpService.js';
 import { IAgentExtensionService } from './agent/AgentExtensionService.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
-import { computeReservedOutputTokens, computeTargetSummarizedRoundCount, CONTEXT_BUDGET_DEFAULTS, estimateTextTokens, reduceSourceResultForContext, reduceToolResultForSummary, stableTextHash, startsExternalConversationRound } from '../common/agent/context/ContextOptimization.js';
+import { computeReservedOutputTokens, computeTargetSummarizedRoundCount, CONTEXT_BUDGET_DEFAULTS, estimateTextTokens, getEffectiveAgentContextWindow, getReadFileContextChars, reduceSourceResultForContext, reduceToolResultForSummary, stableTextHash, startsExternalConversationRound } from '../common/agent/context/ContextOptimization.js';
 
 export const EMPTY_MESSAGE = '(empty message)'
 
@@ -66,6 +66,7 @@ const VOID_RULES_CACHE_TTL_MS = 30_000
 const AGENT_MANIFEST_FILENAMES = ['AGENTS.md', '.voidrules'] as const
 const MAX_IMAGE_PAYLOAD_MESSAGES_IN_HISTORY = 2
 const MAX_TOOL_RESULT_CONTEXT_CHARS = 20_000
+const NUM_RECENT_READ_FILE_RESULTS_TO_KEEP = 2
 const OLDER_IMAGE_OMITTED_REASON = 'older image omitted from LLM context to reduce cost'
 const HISTORY_SUMMARY_STORAGE_KEY = 'void.agent.historyMemory.v3'
 
@@ -1190,6 +1191,13 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 
 		const simpleLLMMessages: SimpleLLMMessage[] = []
 		const imagePayloadMessageIdxs = new Set<number>()
+		const recentReadFileMessageIdxs = new Set<number>()
+		for (let i = chatMessages.length - 1; i >= 0 && recentReadFileMessageIdxs.size < NUM_RECENT_READ_FILE_RESULTS_TO_KEEP; i -= 1) {
+			const message = chatMessages[i]
+			if (message.role === 'tool' && message.type === 'success' && message.name === 'read_file') {
+				recentReadFileMessageIdxs.add(i)
+			}
+		}
 		for (let i = chatMessages.length - 1; i >= 0 && imagePayloadMessageIdxs.size < MAX_IMAGE_PAYLOAD_MESSAGES_IN_HISTORY; i -= 1) {
 			const message = chatMessages[i]
 			const hasEnabledUserImage = message.role === 'user' && !!message.attachments?.some(attachment => !attachment.isLLMDisabled)
@@ -1232,11 +1240,15 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 					const imageAttachmentForLLM = imageAttachment && !imagePayloadMessageIdxs.has(i) && !imageAttachment.isLLMDisabled
 						? { ...imageAttachment, isLLMDisabled: true, disabledReason: OLDER_IMAGE_OMITTED_REASON }
 						: imageAttachment
+					const maxReadFileChars = getReadFileContextChars(
+						m.rawParams?.max_chars,
+						recentReadFileMessageIdxs.has(i),
+					)
 					simpleLLMMessages.push({
 						role: m.role,
 						contextMeta: m.contextMeta,
 						content: m.name === 'read_file'
-							? reduceSourceResultForContext(m.name, m.content, MAX_TOOL_RESULT_CONTEXT_CHARS)
+							? reduceSourceResultForContext(m.name, m.content, maxReadFileChars)
 							: reduceToolResultForSummary(m.name, m.content, MAX_TOOL_RESULT_CONTEXT_CHARS),
 						name: m.name,
 						id: m.id,
@@ -1355,9 +1367,10 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 		let effectiveMessages = llmMessages
 
 		if (threadId) {
-			const reservedForBudget = computeReservedOutputTokens(contextWindow, reservedOutputTokenSpace)
+			const effectiveContextWindow = getEffectiveAgentContextWindow(modelName, contextWindow)
+			const reservedForBudget = computeReservedOutputTokens(effectiveContextWindow, reservedOutputTokenSpace)
 			const fixedPromptTokens = estimateTextTokens(`${aiInstructions}\n${systemMessage}`) + 2_048 // native tool schemas
-			const historyBudgetTokens = Math.max(2_000, contextWindow - reservedForBudget - fixedPromptTokens)
+			const historyBudgetTokens = Math.max(2_000, effectiveContextWindow - reservedForBudget - fixedPromptTokens)
 			const { summaryStr, filteredMessages } = await this._getOrCreateHistoryMemory(threadId, llmMessages, modelSelection, historyBudgetTokens, onWillCompress)
 			if (summaryStr) {
 				effectiveMessages = filteredMessages.map(message => message.role === 'user'

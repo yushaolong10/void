@@ -45,7 +45,7 @@ import { ToolContext } from '../common/agent/tools/ToolDefinition.js';
 import { IAgentExtensionService } from './agent/AgentExtensionService.js';
 import { PermissionDecision } from '../common/agent/permissions/PermissionDecision.js';
 import { rewriteFallbackPolicyError } from '../common/agent/tools/EditToolPolicy.js';
-import { AgentRunBudget, buildResourceDependencies, createAgentRunBudget, findLastUnverifiedMutationIndex, MAX_AGENT_TOOL_CALLS, MAX_AGENT_TURNS, reserveAgentToolCalls } from '../common/agent/runtime/AgentControl.js';
+import { AgentRunBudget, buildResourceDependencies, createAgentRunBudget, findLastUnverifiedMutationIndex, getAgentReasoningEffort, MAX_AGENT_TOOL_CALLS, MAX_AGENT_TURNS, recordAgentProgress, reserveAgentToolCalls } from '../common/agent/runtime/AgentControl.js';
 
 
 // related to retrying when LLM message has error
@@ -1539,6 +1539,9 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 			this._compressionAbortedThreadIds.delete(threadId)
 
 			const chatMessages = this.state.allThreads[threadId]?.messages ?? []
+			const effectiveModelSelectionOptions = modelSelection && /gpt[-.]5[.-]6/i.test(modelSelection.modelName)
+				? { ...modelSelectionOptions, reasoningEnabled: true, reasoningEffort: getAgentReasoningEffort(budget) }
+				: modelSelectionOptions
 
 			const { messages, separateSystemMessage } = await this._convertToLLMMessagesService.prepareLLMChatMessages({
 				chatMessages,
@@ -1587,7 +1590,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 					chatMode,
 					messages: messages,
 					modelSelection,
-					modelSelectionOptions,
+					modelSelectionOptions: effectiveModelSelectionOptions,
 					overridesOfModel,
 					logging: { loggingName: `Chat - ${chatMode}`, loggingExtras: { threadId, nMessagesSent, chatMode } },
 						separateSystemMessage: separateSystemMessage,
@@ -1712,6 +1715,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 
 				// call tool if there is one
 				if (toolCalls && toolCalls.length > 0) {
+					const beforeToolMessageCount = this.state.allThreads[threadId]?.messages.length ?? 0
 					const { awaitingUserApproval, interrupted, shouldSendAnotherMessage: shouldContinue, toolLimitReached } = await this._runToolCallsInOrder(threadId, toolCalls, earlyReadonlyToolRuns, budget)
 					if (interrupted) {
 						this._setStreamState(threadId, undefined)
@@ -1723,6 +1727,13 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 					}
 					else {
 						shouldSendAnotherMessage = !!shouldContinue
+						const newToolMessages = (this.state.allThreads[threadId]?.messages ?? []).slice(beforeToolMessageCount)
+						if (recordAgentProgress(budget, newToolMessages)) {
+							this._addInternalControllerMessage(
+								threadId,
+								`[Controller replan required]\nThe previous approach is not making progress. Do not repeat the same edit or command. Re-evaluate the root cause from current evidence, inspect a different layer, and choose a materially different approach before modifying files again.`,
+							)
+						}
 					}
 
 					this._setStreamState(threadId, { isRunning: 'idle', interrupt: 'not_needed' }) // just decorative, for clarity

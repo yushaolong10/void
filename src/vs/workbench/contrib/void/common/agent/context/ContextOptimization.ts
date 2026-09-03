@@ -3,6 +3,31 @@
  * deterministic so they can be tested without starting an LLM request.
  *--------------------------------------------------------------------------------------------*/
 
+export const GPT56_AGENT_WORKING_CONTEXT = 220_000;
+export const MIN_READ_FILE_CONTEXT_CHARS = 8_000;
+export const DEFAULT_READ_FILE_CONTEXT_CHARS = 64_000;
+export const MAX_READ_FILE_CONTEXT_CHARS = 128_000;
+export const MAX_OLD_READ_FILE_CONTEXT_CHARS = 16_000;
+
+export const normalizeReadFileMaxChars = (value: unknown): number => {
+	const parsed = typeof value === 'number' || (typeof value === 'string' && value.trim())
+		? Number(value)
+		: Number.NaN;
+	const requested = Number.isFinite(parsed) ? parsed : DEFAULT_READ_FILE_CONTEXT_CHARS;
+	return Math.max(MIN_READ_FILE_CONTEXT_CHARS, Math.min(MAX_READ_FILE_CONTEXT_CHARS, requested));
+};
+
+export const getReadFileContextChars = (requestedMaxChars: unknown, isRecent: boolean): number =>
+	isRecent ? normalizeReadFileMaxChars(requestedMaxChars) : MAX_OLD_READ_FILE_CONTEXT_CHARS;
+
+export const getEffectiveAgentContextWindow = (modelName: string, contextWindow: number): number => {
+	const lower = modelName.toLowerCase();
+	if (lower.includes('gpt-5.6') || lower.includes('gpt-5-6')) {
+		return Math.min(contextWindow, GPT56_AGENT_WORKING_CONTEXT);
+	}
+	return contextWindow;
+};
+
 export const CONTEXT_BUDGET_DEFAULTS = {
 	highWatermark: 0.80,
 	lowWatermark: 0.60,

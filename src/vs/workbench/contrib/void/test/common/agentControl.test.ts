@@ -5,7 +5,7 @@
 import assert from 'assert';
 import { URI } from '../../../../../base/common/uri.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
-import { buildResourceDependencies, createAgentRunBudget, findLastUnverifiedMutationIndex, MAX_AGENT_TOOL_CALLS, reserveAgentToolCalls } from '../../common/agent/runtime/AgentControl.js';
+import { buildResourceDependencies, createAgentRunBudget, findLastUnverifiedMutationIndex, getAgentReasoningEffort, MAX_AGENT_TOOL_CALLS, recordAgentProgress, reserveAgentToolCalls } from '../../common/agent/runtime/AgentControl.js';
 import { ChatMessage } from '../../common/chatThreadServiceTypes.js';
 
 suite('Void agent control', () => {
@@ -46,6 +46,21 @@ suite('Void agent control', () => {
 		assert.strictEqual(findLastUnverifiedMutationIndex([edit, failedLint]), 0);
 		assert.strictEqual(findLastUnverifiedMutationIndex([edit, passingTests]), null);
 		assert.strictEqual(findLastUnverifiedMutationIndex([edit, passingTests, edit]), 2);
+	});
+
+	test('escalates reasoning after verification failures and detects repeated failures', () => {
+		const budget = createAgentRunBudget();
+		const failedTest = {
+			role: 'tool', name: 'run_tests', type: 'success', id: 'tests', content: 'Error at line 12: expected 5', rawParams: { command: 'npm test' }, mcpServerName: undefined,
+			params: { command: 'npm test', cwd: null, terminalId: 'terminal' },
+			result: { result: 'failed', resolveReason: { type: 'done', exitCode: 1 } },
+		} as ChatMessage;
+
+		assert.strictEqual(recordAgentProgress(budget, [failedTest]), false);
+		assert.strictEqual(getAgentReasoningEffort(budget), 'high');
+		assert.strictEqual(recordAgentProgress(budget, [{ ...failedTest, content: 'Error at line 34: expected 9' } as ChatMessage]), false);
+		assert.strictEqual(getAgentReasoningEffort(budget), 'xhigh');
+		assert.strictEqual(recordAgentProgress(budget, [{ ...failedTest, content: 'Error at line 56: expected 2' } as ChatMessage]), true);
 	});
 
 	test('does not treat git apply check-only as a mutation', () => {

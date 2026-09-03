@@ -243,7 +243,7 @@ const parseXMLPrefixToToolCall = <T extends ToolName,>(toolName: T, toolId: stri
 		for (const p in paramsObj) {
 			const paramName = p as ToolParamName<T>
 			const orig = paramsObj[paramName]
-			if (orig === undefined) continue
+			if (typeof orig !== 'string') continue
 			paramsObj[paramName] = stripTrailingXMLClosers(trimBeforeAndAfterNewLines(orig), toolName)
 		}
 
@@ -466,7 +466,7 @@ const extractCompletedToolCallsFromSourceText = (
 const toolCallCompletenessScore = (toolCall: RawToolCallObj | undefined): number => {
 	if (!toolCall) return -1
 	const doneParamsScore = toolCall.doneParams.length * 10_000
-	const rawContentScore = Object.values(toolCall.rawParams).reduce((sum, value) => sum + (value?.length ?? 0), 0)
+	const rawContentScore = Object.values(toolCall.rawParams).reduce<number>((sum, value) => sum + (typeof value === 'string' ? value.length : 0), 0)
 	const doneBonus = toolCall.isDone ? 1 : 0
 	return doneParamsScore + rawContentScore + doneBonus
 }

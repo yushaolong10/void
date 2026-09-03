@@ -49,6 +49,7 @@ type SendChatParams_Internal = InternalCommonMessageParams & {
 	separateSystemMessage: string | undefined;
 	chatMode: ChatMode | null;
 	mcpTools: InternalToolInfo[] | undefined;
+	threadId?: string;
 }
 type SendFIMParams_Internal = InternalCommonMessageParams & { messages: LLMFIMMessage; separateSystemMessage: string | undefined; }
 export type ListParams_Internal<ModelResponse> = ModelListParams<ModelResponse>
@@ -255,27 +256,36 @@ const _sendOpenAICompatibleFIM = async ({ messages: { prefix, suffix, stopTokens
 }
 
 
-const toOpenAICompatibleTool = (toolInfo: InternalToolInfo) => {
-	const { name, description, params } = toolInfo
-
-	const paramsWithType: { [s: string]: { description: string; type: 'string' } } = {}
-	for (const [key, value] of Object.entries(params).sort(([a], [b]) => a.localeCompare(b))) { paramsWithType[key] = { ...value, type: 'string' } }
-
+const strictSchemaOfTool = (toolInfo: InternalToolInfo) => {
+	const properties = Object.fromEntries(
+		Object.entries(toolInfo.params)
+			.sort(([a], [b]) => a.localeCompare(b))
+			.map(([name, param]) => {
+				const isOptional = param.required === false || /^optional\./i.test(param.description)
+				return [name, {
+					description: param.description,
+					type: isOptional ? [param.type ?? 'string', 'null'] : param.type ?? 'string',
+					...(param.enum ? { enum: isOptional ? [...param.enum, null] : [...param.enum] } : {}),
+				}]
+			}),
+	)
 	return {
-		type: 'function',
-		function: {
-			name: name,
-			// strict: true, // strict mode - https://platform.openai.com/docs/guides/function-calling?api-mode=chat
-			description: description,
-			parameters: {
-				type: 'object',
-				properties: params,
-				// required: Object.keys(params), // in strict mode, all params are required and additionalProperties is false
-				// additionalProperties: false,
-			},
-		}
-	} satisfies OpenAI.Chat.Completions.ChatCompletionTool
+		type: 'object' as const,
+		properties,
+		required: Object.keys(properties),
+		additionalProperties: false,
+	}
 }
+
+const toOpenAICompatibleTool = (toolInfo: InternalToolInfo) => ({
+	type: 'function' as const,
+	function: {
+		name: toolInfo.name,
+		description: toolInfo.description,
+		strict: true,
+		parameters: strictSchemaOfTool(toolInfo),
+	}
+}) satisfies OpenAI.Chat.Completions.ChatCompletionTool
 
 const openAITools = (chatMode: ChatMode | null, mcpTools: InternalToolInfo[] | undefined, options?: { supportsVision?: boolean }) => {
 	const allowedTools = availableTools(chatMode, mcpTools, options)
@@ -283,7 +293,18 @@ const openAITools = (chatMode: ChatMode | null, mcpTools: InternalToolInfo[] | u
 
 	const openAITools: OpenAI.Chat.Completions.ChatCompletionTool[] = []
 	for (const tool of [...allowedTools].sort((a, b) => a.name.localeCompare(b.name))) {
-		openAITools.push(toOpenAICompatibleTool(tool))
+		// MCP schemas may contain constructs that are not accepted by OpenAI strict mode.
+		openAITools.push(tool.mcpServerName ? {
+			type: 'function',
+			function: {
+				name: tool.name,
+				description: tool.description,
+				parameters: {
+					type: 'object',
+					properties: Object.fromEntries(Object.entries(tool.params).map(([name, param]) => [name, { type: param.type ?? 'string', description: param.description }])),
+				},
+			},
+		} : toOpenAICompatibleTool(tool))
 	}
 	return openAITools
 }
@@ -329,6 +350,160 @@ const rawToolCallsOfOpenAIToolCalls = (toolCallsByIndex: Map<number, StreamingOp
 }
 
 
+type ResponsesThreadState = {
+	previousResponseId: string;
+	nextMessageIndex: number;
+	providerName: ProviderName;
+	modelName: string;
+	endpoint?: string;
+	messagePrefix: string[];
+}
+
+const responsesStateByThread = new Map<string, ResponsesThreadState>()
+
+const responsesMessageFingerprint = (message: LLMChatMessage): string => JSON.stringify(message)
+
+const toResponsesInput = (messages: LLMChatMessage[]): any[] => {
+	const input: any[] = []
+	for (const message of messages as any[]) {
+		if (message.role === 'tool') {
+			input.push({ type: 'function_call_output', call_id: message.tool_call_id, output: message.content })
+			continue
+		}
+		if (message.role === 'assistant' && message.tool_calls?.length) {
+			if (message.content) input.push({ role: 'assistant', content: message.content })
+			for (const toolCall of message.tool_calls) {
+				input.push({
+					type: 'function_call',
+					call_id: toolCall.id,
+					name: toolCall.function.name,
+					arguments: toolCall.function.arguments,
+				})
+			}
+			continue
+		}
+		if (message.role === 'user' && Array.isArray(message.content)) {
+			input.push({
+				role: 'user',
+				content: message.content.map((part: any) => part.type === 'image_url'
+					? { type: 'input_image', image_url: part.image_url.url, detail: 'auto' }
+					: { type: 'input_text', text: part.text ?? '' }),
+			})
+			continue
+		}
+		input.push(message)
+	}
+	return input
+}
+
+const toResponsesTool = (toolInfo: InternalToolInfo): OpenAI.Responses.FunctionTool => ({
+	type: 'function',
+	name: toolInfo.name,
+	description: toolInfo.description,
+	parameters: toolInfo.mcpServerName ? {
+		type: 'object',
+		properties: Object.fromEntries(Object.entries(toolInfo.params).map(([name, param]) => [name, { type: param.type ?? 'string', description: param.description }])),
+	} : strictSchemaOfTool(toolInfo),
+	strict: !toolInfo.mcpServerName,
+})
+
+const _sendOpenAIResponsesChat = async (params: SendChatParams_Internal) => {
+	let { messages, onText, onFinalMessage, onError } = params
+	const { providerName, modelName: modelName_, settingsOfProvider, modelSelectionOptions, overridesOfModel, chatMode, mcpTools, _setAborter, threadId, separateSystemMessage } = params
+	const { modelName, supportsVision } = getModelCapabilities(providerName, modelName_, overridesOfModel)
+	const openai = await newOpenAICompatibleSDK({ providerName, settingsOfProvider })
+	const endpoint = settingsOfProvider[providerName].endpoint
+	const state = threadId ? responsesStateByThread.get(threadId) : undefined
+	const canContinue = !!state
+		&& state.providerName === providerName
+		&& state.modelName === modelName
+		&& state.endpoint === endpoint
+		&& state.nextMessageIndex <= messages.length
+		&& state.messagePrefix.every((fingerprint, index) => responsesMessageFingerprint(messages[index]) === fingerprint)
+	if (canContinue) messages = messages.slice(state.nextMessageIndex)
+	else if (threadId && state) responsesStateByThread.delete(threadId)
+
+	const reasoningInfo = getSendableReasoningInfo('Chat', providerName, modelName_, modelSelectionOptions, overridesOfModel)
+	const effort = reasoningInfo?.isReasoningEnabled && reasoningInfo.type === 'effort_slider_value'
+		? reasoningInfo.reasoningEffort
+		: undefined
+	const tools = availableTools(chatMode, mcpTools, { supportsVision })?.map(toResponsesTool)
+	const stream = openai.responses.stream({
+		model: modelName,
+		input: toResponsesInput(messages),
+		...(separateSystemMessage ? { instructions: separateSystemMessage } : {}),
+		...(tools?.length ? { tools } : {}),
+		...(effort ? { reasoning: { effort } } : {}),
+		...(canContinue ? { previous_response_id: state.previousResponseId } : {}),
+		...(threadId ? { prompt_cache_key: `${threadId}:${modelName}` } : {}),
+	} as any)
+	_setAborter(() => stream.abort())
+
+	let fullText = ''
+	let completedResponse: any
+	let responseFailure: any
+	const toolCallsByIndex = new Map<number, StreamingOpenAIToolCall>()
+	const watchdog = createLLMStreamWatchdog({ providerName, modelName, onError, onAbort: () => stream.abort() })
+	watchdog.bump()
+	try {
+		for await (const event of stream) {
+			watchdog.bump()
+			if (event.type === 'response.output_text.delta') fullText += event.delta
+			else if (event.type === 'response.output_item.done' && event.item.type === 'function_call') {
+				toolCallsByIndex.set(event.output_index, { name: event.item.name, paramsStr: event.item.arguments, id: event.item.call_id })
+			}
+			else if (event.type === 'response.completed') completedResponse = event.response
+			else if ((event as any).type === 'response.failed' || (event as any).type === 'response.incomplete') {
+				responseFailure = (event as any).response ?? event
+			}
+			const partialToolCalls = partialRawToolCallsOfOpenAIToolCalls(toolCallsByIndex)
+			onText({ fullText, fullReasoning: '', toolCall: partialToolCalls[0], toolCalls: partialToolCalls.length ? partialToolCalls : undefined })
+		}
+		if (responseFailure) {
+			throw new Error(`OpenAI Responses request ${responseFailure.status ?? 'failed'}: ${responseFailure.error?.message ?? responseFailure.incomplete_details?.reason ?? 'unknown error'}`)
+		}
+		if (!completedResponse) completedResponse = await stream.finalResponse()
+		if (completedResponse?.status && completedResponse.status !== 'completed') {
+			throw new Error(`OpenAI Responses request ${completedResponse.status}: ${completedResponse.error?.message ?? completedResponse.incomplete_details?.reason ?? 'unknown error'}`)
+		}
+		if (threadId && completedResponse?.id) {
+			responsesStateByThread.set(threadId, {
+				previousResponseId: completedResponse.id,
+				nextMessageIndex: params.messages.length + 1,
+				providerName,
+				modelName,
+				endpoint,
+				messagePrefix: params.messages.map(responsesMessageFingerprint),
+			})
+		}
+		const toolCalls = rawToolCallsOfOpenAIToolCalls(toolCallsByIndex)
+		if (!fullText && toolCalls.length === 0) {
+			onError({ message: 'Void: Response from model was empty.', fullError: null })
+			return
+		}
+		const usage = completedResponse?.usage
+		onFinalMessage({
+			fullText,
+			fullReasoning: '',
+			anthropicReasoning: null,
+			...(toolCalls.length ? { toolCall: toolCalls[0], toolCalls } : {}),
+			usage: usage ? {
+				inputTokens: usage.input_tokens,
+				outputTokens: usage.output_tokens,
+				reasoningTokens: usage.output_tokens_details?.reasoning_tokens,
+				cacheReadTokens: usage.input_tokens_details?.cached_tokens,
+			} : undefined,
+		})
+	} catch (error) {
+		if ((error as any)?.name === 'AbortError') return
+		if (threadId) responsesStateByThread.delete(threadId)
+		if (error instanceof OpenAI.APIError && error.status === 401) onError({ message: invalidApiKeyMessage(providerName), fullError: error })
+		else onError({ message: error + '', fullError: error as Error })
+	} finally {
+		watchdog.clear()
+	}
+}
+
 const rawToolCallObjOfAnthropicParams = (toolBlock: Anthropic.Messages.ToolUseBlock): RawToolCallObj | null => {
 	const { id, name, input } = toolBlock
 
@@ -343,7 +518,13 @@ const rawToolCallObjOfAnthropicParams = (toolBlock: Anthropic.Messages.ToolUseBl
 // ------------ OPENAI-COMPATIBLE ------------
 
 
-const _sendOpenAICompatibleChat = async ({ messages, onText, onFinalMessage, onError, settingsOfProvider, modelSelectionOptions, modelName: modelName_, _setAborter, providerName, chatMode, separateSystemMessage, overridesOfModel, mcpTools }: SendChatParams_Internal) => {
+const _sendOpenAICompatibleChat = async (params: SendChatParams_Internal) => {
+	const { messages, onError, settingsOfProvider, modelSelectionOptions, modelName: modelName_, _setAborter, providerName, chatMode, overridesOfModel, mcpTools } = params
+	let { onText, onFinalMessage } = params
+	const apiMode = isOpenAICompatibleProviderName(providerName) ? settingsOfProvider[providerName].apiMode : undefined
+	if ((providerName === 'openAI' && /gpt[-.]5[.-]6/i.test(modelName_)) || apiMode === 'responses') {
+		return _sendOpenAIResponsesChat(params)
+	}
 	const {
 		modelName,
 		specialToolFormat: modelSpecialToolFormat,

@@ -15,14 +15,14 @@ import { IVoidCommandBarService } from './voidCommandBarService.js'
 import { computeDirectoryTree1Deep, IDirectoryStrService, stringifyDirectoryTree1Deep } from '../common/directoryStrService.js'
 import { IMarkerService, MarkerSeverity } from '../../../../platform/markers/common/markers.js'
 import { RawToolParamsObj } from '../common/sendLLMMessageTypes.js'
-import { MAX_CHILDREN_URIs_PAGE, MAX_FILE_CHARS_PAGE, MAX_READ_FILE_CONTEXT_CHARS_PAGE, MAX_TERMINAL_BG_COMMAND_TIME, MAX_TERMINAL_INACTIVE_TIME, MAX_TERMINAL_TOTAL_TIME } from '../common/prompt/prompts.js'
+import { MAX_CHILDREN_URIs_PAGE, MAX_FILE_CHARS_PAGE, MAX_TERMINAL_BG_COMMAND_TIME, MAX_TERMINAL_INACTIVE_TIME, MAX_TERMINAL_TOTAL_TIME } from '../common/prompt/prompts.js'
 import { IVoidSettingsService } from '../common/voidSettingsService.js'
 import { generateUuid } from '../../../../base/common/uuid.js'
 import { extractSearchReplaceBlocks, normalizeSearchReplaceBlocks } from '../common/helpers/extractCodeFromResult.js'
 import { IBrowserAgentBridge, createLegacyToolInvocation } from './agent/BrowserAgentBridge.js'
 import { ReviewSnapshotManager } from '../common/agent/execution/ReviewSnapshotManager.js'
 import { WorktreeManager } from '../common/agent/execution/WorktreeManager.js'
-import { paginateContiguousSource } from '../common/agent/context/ContextOptimization.js'
+import { normalizeReadFileMaxChars, paginateContiguousSource } from '../common/agent/context/ContextOptimization.js'
 import { safeStringify } from '../common/agent/tools/safeSerialize.js'
 import type { ImageAttachment } from '../common/chatThreadServiceTypes.js'
 
@@ -127,6 +127,8 @@ const validatePageNum = (pageNumberUnknown: unknown) => {
 	if (parsedInt < 1) throw new Error(`Invalid LLM output format: Specified page number must be 1 or greater: "${pageNumberUnknown}".`)
 	return parsedInt
 }
+
+const validateReadMaxChars = (value: unknown) => normalizeReadFileMaxChars(value)
 
 const validateNumber = (numStr: unknown, opts: { default: number | null }) => {
 	if (typeof numStr === 'number')
@@ -258,8 +260,9 @@ export class ToolsService implements IToolsService {
 
 		this.validateParams = {
 			read_file: (params: RawToolParamsObj) => {
-				const { uri: uriStr, start_line: startLineUnknown, end_line: endLineUnknown, page_number: pageNumberUnknown } = params
+				const { uri: uriStr, start_line: startLineUnknown, end_line: endLineUnknown, max_chars: maxCharsUnknown, page_number: pageNumberUnknown } = params
 				const uri = validateURI(uriStr)
+				const maxChars = validateReadMaxChars(maxCharsUnknown)
 				const pageNumber = validatePageNum(pageNumberUnknown)
 
 				let startLine = validateNumber(startLineUnknown, { default: null })
@@ -269,7 +272,7 @@ export class ToolsService implements IToolsService {
 				if (endLine !== null && endLine < 1) throw new Error('end_line must be a 1-based line number greater than or equal to 1.')
 				if (startLine !== null && endLine !== null && startLine > endLine) throw new Error('start_line must be less than or equal to end_line.')
 
-				return { uri, startLine, endLine, pageNumber }
+				return { uri, startLine, endLine, maxChars, pageNumber }
 			},
 			read_image: (params: RawToolParamsObj) => {
 				const { uri: uriStr } = params
@@ -279,7 +282,8 @@ export class ToolsService implements IToolsService {
 			ls_dir: (params: RawToolParamsObj) => {
 				const { uri: uriStr, page_number: pageNumberUnknown } = params
 
-				const uri = validateURI(uriStr)
+				const uri = validateOptionalURI(uriStr) ?? workspaceContextService.getWorkspace().folders[0]?.uri
+				if (!uri) throw new Error('No workspace folder is open. Provide uri explicitly.')
 				const pageNumber = validatePageNum(pageNumberUnknown)
 				return { uri, pageNumber }
 			},
@@ -524,7 +528,7 @@ export class ToolsService implements IToolsService {
 
 
 		this.callTool = {
-			read_file: async ({ uri, startLine, endLine, pageNumber }) => {
+			read_file: async ({ uri, startLine, endLine, maxChars, pageNumber }) => {
 				await voidModelService.initializeModel(uri)
 				const { model } = await voidModelService.getModelSafe(uri)
 				if (model === null) { throw new Error(`No contents; File does not exist.`) }
@@ -541,7 +545,7 @@ export class ToolsService implements IToolsService {
 
 				const totalNumLines = model.getLineCount()
 
-				const pages = paginateContiguousSource(contents, startLineNumber, MAX_READ_FILE_CONTEXT_CHARS_PAGE)
+				const pages = paginateContiguousSource(contents, startLineNumber, maxChars)
 				const page = pages[pageNumber - 1]
 				const fileContents = page?.content ?? ''
 				const hasNextPage = pageNumber < pages.length

@@ -55,7 +55,7 @@ export const toolApprovalTypes = new Set<ToolApprovalType>([
 
 // PARAMS OF TOOL CALL
 export type BuiltinToolCallParams = {
-	'read_file': { uri: URI, startLine: number | null, endLine: number | null, pageNumber: number },
+	'read_file': { uri: URI, startLine: number | null, endLine: number | null, maxChars: number, pageNumber: number },
 	'read_image': { uri: URI },
 	'ls_dir': { uri: URI, pageNumber: number },
 	'get_dir_tree': { uri: URI },

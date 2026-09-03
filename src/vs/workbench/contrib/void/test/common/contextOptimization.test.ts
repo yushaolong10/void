@@ -4,7 +4,7 @@
 
 import assert from 'assert';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
-import { computeReservedOutputTokens, computeTargetSummarizedRoundCount, estimateTextTokens, paginateContiguousSource, reduceSourceResultForContext, reduceToolResultForSummary, stableTextHash, startsExternalConversationRound } from '../../common/agent/context/ContextOptimization.js';
+import { computeReservedOutputTokens, computeTargetSummarizedRoundCount, estimateTextTokens, getEffectiveAgentContextWindow, getReadFileContextChars, normalizeReadFileMaxChars, paginateContiguousSource, reduceSourceResultForContext, reduceToolResultForSummary, stableTextHash, startsExternalConversationRound } from '../../common/agent/context/ContextOptimization.js';
 
 suite('Void context optimization', () => {
 	ensureNoDisposablesAreLeakedInTestSuite();
@@ -42,6 +42,27 @@ suite('Void context optimization', () => {
 			[[101, 103], [104, 106], [107, 109], [110, 112]],
 		);
 		assert(pages.every(page => !page.startsMidLine && !page.endsMidLine));
+	});
+
+	test('read_file defaults to 64K chars', () => {
+		assert.strictEqual(normalizeReadFileMaxChars(undefined), 64_000);
+	});
+
+	test('read_file max_chars is clamped between 8K and 128K', () => {
+		assert.strictEqual(normalizeReadFileMaxChars(1_000), 8_000);
+		assert.strictEqual(normalizeReadFileMaxChars('96_000'), 64_000);
+		assert.strictEqual(normalizeReadFileMaxChars('96000'), 96_000);
+		assert.strictEqual(normalizeReadFileMaxChars(256_000), 128_000);
+	});
+
+	test('recent read_file preserves requested context while old reads are reduced', () => {
+		const content = `${'x'.repeat(127_000)}TAIL_SENTINEL`;
+		const recent = reduceSourceResultForContext('read_file', content, getReadFileContextChars('128000', true));
+		const old = reduceSourceResultForContext('read_file', content, getReadFileContextChars('128000', false));
+
+		assert(recent.includes('TAIL_SENTINEL'));
+		assert.strictEqual(old.length, 16_000);
+		assert(!old.includes('TAIL_SENTINEL'));
 	});
 
 	test('splits an unusually long source line without appending a misleading tail', () => {
@@ -90,6 +111,12 @@ suite('Void context optimization', () => {
 	test('produces stable content hashes', () => {
 		assert.strictEqual(stableTextHash('same'), stableTextHash('same'));
 		assert.notStrictEqual(stableTextHash('same'), stableTextHash('changed'));
+	});
+
+	test('caps GPT-5.6 agent working context without changing other models', () => {
+		assert.strictEqual(getEffectiveAgentContextWindow('gpt-5.6-sol', 1_050_000), 220_000);
+		assert.strictEqual(getEffectiveAgentContextWindow('vendor/gpt-5-6', 1_050_000), 220_000);
+		assert.strictEqual(getEffectiveAgentContextWindow('gpt-4.1', 1_047_576), 1_047_576);
 	});
 
 	test('reserves configured output without discarding half the context by default', () => {

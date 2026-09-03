@@ -11,6 +11,7 @@ import { os } from '../helpers/systemInfo.js';
 import { RawToolParamsObj } from '../sendLLMMessageTypes.js';
 import { approvalTypeOfBuiltinToolName, BuiltinToolCallParams, BuiltinToolName, BuiltinToolResultType, ToolName } from '../toolsServiceTypes.js';
 import { ChatMode } from '../voidSettingsTypes.js';
+import { DEFAULT_READ_FILE_CONTEXT_CHARS } from '../agent/context/ContextOptimization.js';
 
 // Triple backtick wrapper used throughout the prompts for code blocks
 export const tripleTick = ['```', '```']
@@ -23,7 +24,8 @@ export const MAX_DIRSTR_RESULTS_TOTAL_TOOL = 100
 
 // tool info
 export const MAX_FILE_CHARS_PAGE = 500_000
-export const MAX_READ_FILE_CONTEXT_CHARS_PAGE = 18_000
+// Large enough to inspect a meaningful source section without repeatedly paging.
+export const MAX_READ_FILE_CONTEXT_CHARS_PAGE = DEFAULT_READ_FILE_CONTEXT_CHARS
 export const MAX_CHILDREN_URIs_PAGE = 500
 
 // terminal tool info
@@ -125,11 +127,18 @@ Guidelines:
 // ======================================================== tools ========================================================
 
 
+export type ToolParamInfo = {
+	description: string;
+	type?: 'string' | 'number' | 'boolean';
+	required?: boolean;
+	enum?: readonly string[];
+}
+
 export type InternalToolInfo = {
 	name: string,
 	description: string,
 	params: {
-		[paramName: string]: { description: string }
+		[paramName: string]: ToolParamInfo
 	},
 	// Only if the tool is from an MCP server
 	mcpServerName?: string,
@@ -142,14 +151,18 @@ const uriParam = (object: string) => ({
 })
 
 const paginationParam = {
-	page_number: { description: 'Optional. The page number of the result. Default is 1.' }
+	page_number: { description: 'Optional. The page number of the result. Default is 1.', type: 'number', required: false }
 } as const
 
 
 
 const terminalDescHelper = `Run terminal commands for inspection or verification only, such as sed, grep, one-off diagnostics, format checks, and benchmarks. Prefer purpose-built tools for supported actions: use edit_file/rewrite_file for file edits, git_status/git_diff/git_apply_patch/git_create_branch/git_commit/git_worktree_create/git_worktree_delete for git operations, run_tests for tests/builds/type checks/lints, install_dependencies for dependency installs, and package_script_list for package scripts. Use run_command only as a fallback when no purpose-built tool covers the command. Choose the smallest command that reduces uncertainty. For commands that may run for a long time or produce delayed output, such as dev servers or watchers, open a persistent terminal first and run the command there. For commands that may open an interactive editor or pager, pipe output to cat or use a non-interactive flag.`
 
+const optionalStringParam = (description: string): ToolParamInfo => ({ description, required: false })
+const optionalBooleanParam = (description: string): ToolParamInfo => ({ description, type: 'boolean', required: false })
+
 const cwdHelper = 'Optional. The directory in which to run the command. Defaults to the first workspace folder.'
+const cwdParam = optionalStringParam(cwdHelper)
 
 export type SnakeCase<S extends string> =
 	// exact acronym URI
@@ -172,18 +185,19 @@ export const builtinTools: {
 		name: string;
 		description: string;
 		// more params can be generated than exist here, but these params must be a subset of them
-		params: Partial<{ [paramName in keyof SnakeCaseKeys<BuiltinToolCallParams[T]>]: { description: string } }>
+		params: Partial<{ [paramName in keyof SnakeCaseKeys<BuiltinToolCallParams[T]>]: ToolParamInfo }>
 	}
 } = {
 	// --- context-gathering (read/search/list) ---
 
 	read_file: {
 		name: 'read_file',
-		description: `Returns one contiguous page of a file. If the result says more content remains, read the same URI and line range with the next page_number before advancing to another range.`,
+		description: `Reads a contiguous section of a source file. Prefer search_in_file or read_symbol when locating a specific symbol. For normal file understanding, use the default 64K-character page and select a relevant start_line/end_line range instead of repeatedly reading small ranges. Increase max_chars up to 128K only when broader context is necessary. If more content remains, continue with the next page only when needed.`,
 		params: {
 			...uriParam('file'),
-			start_line: { description: 'Optional. Inclusive, 1-based start line. Defaults to the beginning of the file.' },
-			end_line: { description: 'Optional. Inclusive, 1-based end line. Defaults to the end of the file.' },
+			start_line: { description: 'Optional. Inclusive, 1-based start line. Defaults to the beginning of the file.', type: 'number', required: false },
+			end_line: { description: 'Optional. Inclusive, 1-based end line. Defaults to the end of the file.', type: 'number', required: false },
+			max_chars: { description: 'Optional. Maximum characters per page. Defaults to 64000 and is clamped between 8000 and 128000.', type: 'number', required: false },
 			...paginationParam,
 		},
 	},
@@ -200,7 +214,7 @@ export const builtinTools: {
 		name: 'ls_dir',
 		description: `Lists all files and folders in the given URI.`,
 		params: {
-			uri: { description: `Optional. The FULL path to the ${'folder'}. Leave this as empty or "" to search all folders.` },
+			uri: { description: `Optional. The FULL path to the ${'folder'}. Leave this as empty or "" to search all folders.`, required: false },
 			...paginationParam,
 		},
 	},
@@ -222,7 +236,7 @@ export const builtinTools: {
 		description: `Returns all pathnames that match a given query (searches ONLY file names). You should use this when looking for a file with a specific name or path.`,
 		params: {
 			query: { description: `Your query for the search.` },
-			include_pattern: { description: 'Optional. Only fill this in if you need to limit your search because there were too many results.' },
+			include_pattern: { description: 'Optional. Only fill this in if you need to limit your search because there were too many results.', required: false },
 			...paginationParam,
 		},
 	},
@@ -234,8 +248,8 @@ export const builtinTools: {
 		description: `Returns a list of file names whose content matches the given query. The query can be any substring or regex.`,
 		params: {
 			query: { description: `Your query for the search.` },
-			search_in_folder: { description: 'Optional. Leave as blank by default. ONLY fill this in if your previous search with the same query was truncated. Searches descendants of this folder only.' },
-			is_regex: { description: 'Optional. Default is false. Whether the query is a regex.' },
+			search_in_folder: { description: 'Optional. Leave as blank by default. ONLY fill this in if your previous search with the same query was truncated. Searches descendants of this folder only.', required: false },
+			is_regex: { description: 'Optional. Default is false. Whether the query is a regex.', type: 'boolean', required: false },
 			...paginationParam,
 		},
 	},
@@ -247,7 +261,7 @@ export const builtinTools: {
 		params: {
 			...uriParam('file'),
 			query: { description: 'The string or regex to search for in the file.' },
-			is_regex: { description: 'Optional. Default is false. Whether the query is a regex.' }
+			is_regex: { description: 'Optional. Default is false. Whether the query is a regex.', type: 'boolean', required: false }
 		}
 	},
 
@@ -256,7 +270,7 @@ export const builtinTools: {
 		description: `Finds likely definitions and important mentions of a symbol using workspace text search. Use this before editing code that depends on a function, class, type, or variable.`,
 		params: {
 			symbol: { description: 'The exact symbol name to search for.' },
-			search_in_folder: { description: 'Optional. Search descendants of this folder only.' },
+			search_in_folder: optionalStringParam('Optional. Search descendants of this folder only.'),
 			...paginationParam,
 		},
 	},
@@ -266,7 +280,7 @@ export const builtinTools: {
 		description: `Finds workspace references to a symbol using text search. Use this to estimate blast radius before refactors.`,
 		params: {
 			symbol: { description: 'The exact symbol name to search for.' },
-			search_in_folder: { description: 'Optional. Search descendants of this folder only.' },
+			search_in_folder: optionalStringParam('Optional. Search descendants of this folder only.'),
 			...paginationParam,
 		},
 	},
@@ -276,7 +290,7 @@ export const builtinTools: {
 		description: `Finds likely definition locations for a symbol using language-like text patterns. Prefer this before opening many unrelated files.`,
 		params: {
 			symbol: { description: 'The exact symbol name to find.' },
-			search_in_folder: { description: 'Optional. Search descendants of this folder only.' },
+			search_in_folder: optionalStringParam('Optional. Search descendants of this folder only.'),
 			...paginationParam,
 		},
 	},
@@ -302,7 +316,7 @@ export const builtinTools: {
 		description: `Returns the current git diff. Use this after edits to review exactly what changed before summarizing or committing.`,
 		params: {
 			cwd: { description: cwdHelper },
-			staged: { description: 'Optional. Set true to inspect staged changes only. Default is false.' },
+			staged: { description: 'Optional. Set true to inspect staged changes only. Default is false.', type: 'boolean', required: false },
 		},
 	},
 
@@ -312,7 +326,7 @@ export const builtinTools: {
 		params: {
 			cwd: { description: cwdHelper },
 			patch: { description: 'The complete unified diff patch text.' },
-			check_only: { description: 'Optional. Set true to validate without applying. Default is false.' },
+			check_only: { description: 'Optional. Set true to validate without applying. Default is false.', type: 'boolean', required: false },
 		},
 	},
 
@@ -330,9 +344,9 @@ export const builtinTools: {
 		name: 'git_commit',
 		description: `Creates a git commit after the user has approved the changes. Use git_status and git_diff first.`,
 		params: {
-			cwd: { description: cwdHelper },
+			cwd: cwdParam,
 			message: { description: 'The commit message.' },
-			all: { description: 'Optional. Set true to stage modified/deleted tracked files with git commit -am. Default is false.' },
+			all: optionalBooleanParam('Optional. Set true to stage modified/deleted tracked files with git commit -am. Default is false.'),
 		},
 	},
 
@@ -353,7 +367,7 @@ export const builtinTools: {
 		params: {
 			cwd: { description: cwdHelper },
 			path: { description: 'The relative or absolute worktree path to remove.' },
-			prune: { description: 'Optional. Set true to run git worktree prune after removing. Default is true.' },
+			prune: { description: 'Optional. Set true to run git worktree prune after removing. Default is true.', type: 'boolean', required: false },
 		},
 	},
 
@@ -371,7 +385,7 @@ export const builtinTools: {
 		params: {
 			cwd: { description: cwdHelper },
 			goal: { description: 'The review focus, such as "check regression risk before commit".' },
-			include_diff: { description: 'Optional. Include the full git diff in the review snapshot. Default is true.' },
+			include_diff: { description: 'Optional. Include the full git diff in the review snapshot. Default is true.', type: 'boolean', required: false },
 		},
 	},
 
@@ -380,7 +394,7 @@ export const builtinTools: {
 		description: `Extracts likely failure snippets from a test, lint, build, or typecheck output. Use this after run_tests when the output is long or noisy.`,
 		params: {
 			output: { description: 'The raw output returned by run_tests or another verification command.' },
-			max_items: { description: 'Optional. Maximum number of failure snippets to return. Default is 8.' },
+			max_items: { description: 'Optional. Maximum number of failure snippets to return. Default is 8.', type: 'number', required: false },
 		},
 	},
 
@@ -399,7 +413,7 @@ export const builtinTools: {
 		description: `Delete a file or folder at the given path.`,
 		params: {
 			...uriParam('file or folder'),
-			is_recursive: { description: 'Optional. Return true to delete recursively.' }
+			is_recursive: { description: 'Optional. Return true to delete recursively.', type: 'boolean', required: false }
 		},
 	},
 

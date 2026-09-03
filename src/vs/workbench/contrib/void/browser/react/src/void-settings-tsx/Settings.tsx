@@ -635,9 +635,11 @@ const ProviderSetting = ({ providerName, settingName, subTextMd }: { providerNam
 		voidSettingsService.setSettingOfProvider(providerName, settingName, newVal)
 	}, [voidSettingsService, providerName, settingName]);
 
-	if (settingName === 'responseFormat') {
-		const options = ['xml', 'tool-call'] as const
-		const selectedOption = options.find(option => option === settingValue) ?? 'tool-call'
+	if (settingName === 'responseFormat' || settingName === 'apiMode') {
+		const options = settingName === 'responseFormat'
+			? ['xml', 'tool-call'] as const
+			: ['chat-completions', 'responses'] as const
+		const selectedOption = options.find(option => option === settingValue) ?? options[0]
 		return <ErrorBoundary>
 			<div className='my-1'>
 				<div className='px-3 py-1 opacity-70 text-sm'>{settingTitle}</div>

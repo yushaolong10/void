@@ -91,8 +91,9 @@ export type LLMFIMMessage = {
 }
 
 
+export type RawToolParamValue = string | number | boolean | null;
 export type RawToolParamsObj = {
-	[paramName in ToolParamName<ToolName>]?: string;
+	[paramName in ToolParamName<ToolName>]?: RawToolParamValue;
 }
 export type RawToolCallObj = {
 	name: ToolName;

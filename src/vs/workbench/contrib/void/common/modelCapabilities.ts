@@ -10,6 +10,7 @@ const openAICompatibleProviderSettings = {
 	apiKey: '',
 	headersJSON: '{}', // default to {}
 	responseFormat: 'tool-call',
+	apiMode: 'chat-completions',
 } as const
 
 
@@ -87,6 +88,7 @@ export const defaultProviderSettings = {
 
 export const defaultModelsOfProvider = {
 	openAI: [ // https://platform.openai.com/docs/models/gp
+		'gpt-5.6-sol',
 		'gpt-4.1',
 		'gpt-4.1-mini',
 		'gpt-4.1-nano',
@@ -278,6 +280,7 @@ const inferSupportsVision = (providerName: ProviderName, modelName: string): boo
 	if (providerName === 'gemini') return false // Void does not send image parts on the Gemini path yet.
 
 	if (providerName === 'openAI') {
+		if (lower.includes('gpt-5.6') || lower.includes('gpt-5-6')) return true
 		if (lower.includes('gpt-4.1') || lower.includes('gpt-4-1')) return true
 		if (lower.includes('gpt-4o')) return true
 		if (lower.includes('o3') || lower.includes('o4')) return true
@@ -293,6 +296,7 @@ const inferSupportsVision = (providerName: ProviderName, modelName: string): boo
 
 	if (lower.includes('deepseek')) return false
 	if (lower.includes('claude')) return true
+	if (lower.includes('gpt-5.6') || lower.includes('gpt-5-6')) return true
 	if (lower.includes('gpt-4.1') || lower.includes('gpt-4-1') || lower.includes('gpt-4o')) return true
 
 	return undefined
@@ -514,6 +518,7 @@ const extensiveModelOptionsFallback: VoidStaticProviderInfo['modelOptionsFallbac
 
 	if (lower.includes('quasar') || lower.includes('quaser')) return toFallback(openSourceModelOptions_assumingOAICompat, 'quasar')
 
+	if (lower.includes('gpt-5.6') || lower.includes('gpt-5-6')) return toFallback(openAIModelOptions, 'gpt-5.6-sol')
 	if (lower.includes('gpt') && lower.includes('mini') && (lower.includes('4.1') || lower.includes('4-1'))) return toFallback(openAIModelOptions, 'gpt-4.1-mini')
 	if (lower.includes('gpt') && lower.includes('nano') && (lower.includes('4.1') || lower.includes('4-1'))) return toFallback(openAIModelOptions, 'gpt-4.1-nano')
 	if (lower.includes('gpt') && (lower.includes('4.1') || lower.includes('4-1'))) return toFallback(openAIModelOptions, 'gpt-4.1')
@@ -667,6 +672,22 @@ const anthropicSettings: VoidStaticProviderInfo = {
 
 // ---------------- OPENAI ----------------
 const openAIModelOptions = { // https://platform.openai.com/docs/pricing
+	'gpt-5.6-sol': {
+		contextWindow: 1_050_000,
+		reservedOutputTokenSpace: 32_768,
+		cost: { input: 4.00, output: 20.00, cache_read: 0.40 },
+		downloadable: false,
+		supportsFIM: false,
+		supportsVision: true,
+		specialToolFormat: 'openai-style',
+		supportsSystemMessage: 'developer-role',
+		reasoningCapabilities: {
+			supportsReasoning: true,
+			canTurnOffReasoning: true,
+			canIOReasoning: false,
+			reasoningSlider: { type: 'effort_slider', values: ['none', 'low', 'medium', 'high', 'xhigh', 'max'], default: 'medium' },
+		},
+	},
 	'o3': {
 		contextWindow: 1_047_576,
 		reservedOutputTokenSpace: 32_768,
@@ -782,6 +803,7 @@ const openAISettings: VoidStaticProviderInfo = {
 	modelOptionsFallback: (modelName) => {
 		const lower = modelName.toLowerCase()
 		let fallbackName: keyof typeof openAIModelOptions | null = null
+		if (lower.includes('gpt-5.6') || lower.includes('gpt-5-6')) { fallbackName = 'gpt-5.6-sol' }
 		if (lower.includes('o1')) { fallbackName = 'o1' }
 		if (lower.includes('o3-mini')) { fallbackName = 'o3-mini' }
 		if (lower.includes('gpt-4o')) { fallbackName = 'gpt-4o' }
