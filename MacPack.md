@@ -201,6 +201,58 @@ open ../VSCode-darwin-arm64/*.app
 ```
 
 
+## 10.1 修复应用显示为 1980 年的问题
+
+Electron/VSCodium 的构建链为了生成可重复、哈希稳定的产物，可能会把文件时间戳统一为 ZIP 格式支持的最早时间：
+
+```text
+1980-01-01
+```
+
+因此，安装后在 Finder 的“显示简介”中可能看到应用的创建时间或修改时间为 1980 年。这只是 `.app` 文件系统元数据，不代表应用真的安装于 1980 年，也不会影响应用版本、构建结果或正常运行。
+
+`hdiutil create` 只负责把现有目录封装为 DMG，不会自动刷新 `.app` 的时间戳；从 DMG 拖入“应用程序”时，Finder 还可能保留这些时间。
+
+建议在生成 DMG 前执行：
+
+```bash
+APP="../VSCode-darwin-arm64/Void.app"
+
+# 更新 bundle 内文件和目录的修改时间
+find "$APP" -exec touch -h {} +
+
+# 更新 .app 根目录的创建时间
+xcrun SetFile -d "$(date '+%m/%d/%Y %H:%M:%S')" "$APP"
+
+# 再次确保 .app 根目录的修改时间为当前时间
+touch "$APP"
+```
+
+如果实际应用名称不是 `Void.app`，请相应修改 `APP` 路径。
+
+可在创建 DMG 前验证：
+
+```bash
+stat -f '创建时间：%SB%n修改时间：%Sm' \
+  -t '%Y-%m-%d %H:%M:%S' \
+  "$APP"
+```
+
+如果提示找不到 `SetFile`，先检查 Xcode Command Line Tools：
+
+```bash
+xcrun --find SetFile
+```
+
+如果未来加入正式签名和 Apple 公证，应按以下顺序处理：
+
+```text
+构建 → 修正时间 → codesign → notarization → 创建 DMG
+```
+
+不要在完成签名后再批量修改 `.app` 内容或时间戳。
+
+
 ## 11. 生成本地 `.dmg`
 
 进入项目上一级目录：
@@ -335,6 +387,10 @@ npm install
 npm run buildreact
 npm run gulp vscode-darwin-arm64
 ls ../VSCode-darwin-arm64/*.app
+APP="../VSCode-darwin-arm64/Void.app"
+find "$APP" -exec touch -h {} +
+xcrun SetFile -d "$(date '+%m/%d/%Y %H:%M:%S')" "$APP"
+touch "$APP"
 cd ..
 hdiutil create -volname "Void" -srcfolder VSCode-darwin-arm64 -ov -format UDZO Void-darwin-arm64.dmg
 ```
