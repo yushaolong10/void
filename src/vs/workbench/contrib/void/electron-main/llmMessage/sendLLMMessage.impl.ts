@@ -410,10 +410,7 @@ const toResponsesTool = (toolInfo: InternalToolInfo): OpenAI.Responses.FunctionT
 const _sendOpenAIResponsesChat = async (params: SendChatParams_Internal) => {
 	let { messages, onText, onFinalMessage, onError } = params
 	const { providerName, modelName: modelName_, settingsOfProvider, modelSelectionOptions, overridesOfModel, chatMode, mcpTools, _setAborter, threadId, separateSystemMessage } = params
-	const { modelName, supportsVision } = getModelCapabilities(providerName, modelName_, overridesOfModel)
-const supportsParallelToolCalls = isOpenAICompatibleProviderName(providerName)
-		? settingsOfProvider[providerName].supportsParallelToolCalls === 'true'
-		: false
+	const { modelName, supportsVision, supportsParallelToolCalls } = getModelCapabilities(providerName, modelName_, overridesOfModel)
 	const openai = await newOpenAICompatibleSDK({ providerName, settingsOfProvider })
 	const endpoint = settingsOfProvider[providerName].endpoint
 	const state = threadId ? responsesStateByThread.get(threadId) : undefined
@@ -535,10 +532,8 @@ const _sendOpenAICompatibleChat = async (params: SendChatParams_Internal) => {
 		reasoningCapabilities,
 		additionalOpenAIPayload,
 		supportsVision,
+		supportsParallelToolCalls,
 	} = getModelCapabilities(providerName, modelName_, overridesOfModel)
-	const supportsParallelToolCalls = isOpenAICompatibleProviderName(providerName)
-		? settingsOfProvider[providerName].supportsParallelToolCalls === 'true'
-		: false
 	const configuredResponseFormat = isOpenAICompatibleProviderName(providerName)
 		? settingsOfProvider[providerName].responseFormat
 		: undefined

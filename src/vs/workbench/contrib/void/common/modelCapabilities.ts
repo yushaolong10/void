@@ -11,7 +11,6 @@ const openAICompatibleProviderSettings = {
 	headersJSON: '{}', // default to {}
 	responseFormat: 'tool-call',
 	apiMode: 'chat-completions',
-	supportsParallelToolCalls: 'false',
 } as const
 
 
@@ -190,6 +189,7 @@ export type VoidStaticModelInfo = { // not stateful
 	specialToolFormat?: 'openai-style' | 'anthropic-style' | 'gemini-style', // typically you should use 'openai-style'. null means "can't call tools by default", and asks the LLM to output XML in agent mode
 	supportsFIM: boolean; // whether the model was specifically designed for autocomplete or "FIM" ("fill-in-middle" format)
 	supportsVision?: boolean; // whether Void can send image inputs to this model
+	supportsParallelToolCalls?: boolean; // whether the model supports parallel tool calls
 
 	additionalOpenAIPayload?: { [key: string]: string } // additional payload in the message body for requests that are openai-compatible (ollama, vllm, openai, openrouter, etc)
 
@@ -233,6 +233,7 @@ export const modelOverrideKeys = [
 	'specialToolFormat',
 	'supportsFIM',
 	'supportsVision',
+	'supportsParallelToolCalls',
 	'reasoningCapabilities',
 	'additionalOpenAIPayload'
 ] as const
@@ -271,6 +272,7 @@ const defaultModelOptions = {
 	supportsSystemMessage: false,
 	supportsFIM: false,
 	reasoningCapabilities: false,
+	supportsParallelToolCalls: false,
 } as const satisfies VoidStaticModelInfo
 
 const inferSupportsVision = (providerName: ProviderName, modelName: string): boolean | undefined => {
