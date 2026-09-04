@@ -411,6 +411,9 @@ const _sendOpenAIResponsesChat = async (params: SendChatParams_Internal) => {
 	let { messages, onText, onFinalMessage, onError } = params
 	const { providerName, modelName: modelName_, settingsOfProvider, modelSelectionOptions, overridesOfModel, chatMode, mcpTools, _setAborter, threadId, separateSystemMessage } = params
 	const { modelName, supportsVision } = getModelCapabilities(providerName, modelName_, overridesOfModel)
+const supportsParallelToolCalls = isOpenAICompatibleProviderName(providerName)
+		? settingsOfProvider[providerName].supportsParallelToolCalls === 'true'
+		: false
 	const openai = await newOpenAICompatibleSDK({ providerName, settingsOfProvider })
 	const endpoint = settingsOfProvider[providerName].endpoint
 	const state = threadId ? responsesStateByThread.get(threadId) : undefined
@@ -433,6 +436,7 @@ const _sendOpenAIResponsesChat = async (params: SendChatParams_Internal) => {
 		input: toResponsesInput(messages),
 		...(separateSystemMessage ? { instructions: separateSystemMessage } : {}),
 		...(tools?.length ? { tools } : {}),
+		...(supportsParallelToolCalls && !!tools?.length ? { parallel_tool_calls: true } : {}),
 		...(effort ? { reasoning: { effort } } : {}),
 		...(canContinue ? { previous_response_id: state.previousResponseId } : {}),
 		...(threadId ? { prompt_cache_key: `${threadId}:${modelName}` } : {}),
@@ -532,6 +536,9 @@ const _sendOpenAICompatibleChat = async (params: SendChatParams_Internal) => {
 		additionalOpenAIPayload,
 		supportsVision,
 	} = getModelCapabilities(providerName, modelName_, overridesOfModel)
+	const supportsParallelToolCalls = isOpenAICompatibleProviderName(providerName)
+		? settingsOfProvider[providerName].supportsParallelToolCalls === 'true'
+		: false
 	const configuredResponseFormat = isOpenAICompatibleProviderName(providerName)
 		? settingsOfProvider[providerName].responseFormat
 		: undefined
@@ -570,6 +577,7 @@ const _sendOpenAICompatibleChat = async (params: SendChatParams_Internal) => {
 		stream: true,
 		...(providerName === 'openAI' ? { stream_options: { include_usage: true } } : {}),
 		...nativeToolsObj,
+		...(supportsParallelToolCalls && specialToolFormat === 'openai-style' && !!potentialTools?.length ? { parallel_tool_calls: true } : {}),
 		...additionalOpenAIPayload
 		// max_completion_tokens: maxTokens,
 	}

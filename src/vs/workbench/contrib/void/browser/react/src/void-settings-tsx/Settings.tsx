@@ -635,10 +635,12 @@ const ProviderSetting = ({ providerName, settingName, subTextMd }: { providerNam
 		voidSettingsService.setSettingOfProvider(providerName, settingName, newVal)
 	}, [voidSettingsService, providerName, settingName]);
 
-	if (settingName === 'responseFormat' || settingName === 'apiMode') {
+	if (settingName === 'responseFormat' || settingName === 'apiMode' || settingName === 'supportsParallelToolCalls') {
 		const options = settingName === 'responseFormat'
 			? ['xml', 'tool-call'] as const
-			: ['chat-completions', 'responses'] as const
+			: settingName === 'apiMode'
+				? ['chat-completions', 'responses'] as const
+				: ['false', 'true'] as const
 		const selectedOption = options.find(option => option === settingValue) ?? options[0]
 		return <ErrorBoundary>
 			<div className='my-1'>

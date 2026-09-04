@@ -204,6 +204,9 @@ export const displayInfoOfSettingName = (providerName: ProviderName, settingName
 	else if (settingName === 'apiMode') {
 		return { title: 'OpenAI API Mode', placeholder: 'chat-completions' }
 	}
+	else if (settingName === 'supportsParallelToolCalls') {
+		return { title: 'Parallel Tool Calls', placeholder: 'false' }
+	}
 	else if (settingName === 'region') {
 		// vertex only
 		return {
@@ -260,6 +263,7 @@ const defaultCustomSettings: Record<CustomSettingName, undefined> = {
 	headersJSON: undefined,
 	responseFormat: undefined,
 	apiMode: undefined,
+	supportsParallelToolCalls: undefined,
 }
 
 

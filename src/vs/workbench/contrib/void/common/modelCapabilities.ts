@@ -11,6 +11,7 @@ const openAICompatibleProviderSettings = {
 	headersJSON: '{}', // default to {}
 	responseFormat: 'tool-call',
 	apiMode: 'chat-completions',
+	supportsParallelToolCalls: 'false',
 } as const
 
 

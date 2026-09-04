@@ -708,6 +708,7 @@ export const chat_systemMessage = ({ workspaceFolders, openedURIs, activeURI, pe
 		`After changes, run the smallest useful verification. Never claim a command, test, build, or inspection succeeded unless its result was observed.`,
 		`Stop when the request is complete, blocked, or requires user permission. State any remaining unverified work clearly.`,
 	]
+	if (mode === 'agent') policies.push(`When several independent facts are needed, plan and request the necessary read-only tools together instead of taking one exploratory step per turn. After receiving results, make the smallest coherent set of edits, then verify the changes with one targeted verification pass. Do not split independent reads, edits, or verification steps into separate turns merely to narrate progress.`)
 	if (mode === 'gather') policies.push(`Do not modify workspace files in Gather mode.`)
 	if (mode === 'normal') policies.push(`If repository context is missing, ask the user to attach the relevant file or folder.`)
 
