@@ -149,6 +149,7 @@ export class CodeApplication extends Disposable {
 	private windowsMainService: IWindowsMainService | undefined;
 	private auxiliaryWindowsMainService: IAuxiliaryWindowsMainService | undefined;
 	private nativeHostMainService: INativeHostMainService | undefined;
+	private appInstantiationService: IInstantiationService | undefined;
 
 	constructor(
 		private readonly mainProcessNodeIpcServer: NodeIPCServer,
@@ -586,6 +587,7 @@ export class CodeApplication extends Disposable {
 
 		// Services
 		const appInstantiationService = await this.initServices(machineId, sqmId, devDeviceId, sharedProcessReady);
+		this.appInstantiationService = appInstantiationService;
 
 		// Error telemetry
 		appInstantiationService.invokeFunction(accessor => this._register(new ErrorTelemetry(accessor.get(ILogService), accessor.get(ITelemetryService))));
@@ -1411,7 +1413,14 @@ export class CodeApplication extends Disposable {
 		// Since this operation can take a long time, we want to warm it up while
 		// the window is opening.
 		// We also show an error to the user in case this fails.
-		this.resolveShellEnvironment(this.environmentMainService.args, process.env, true);
+		const shellEnvironmentArgs = {
+			...this.environmentMainService.args,
+			'force-user-env': true,
+		};
+		const shellEnvironmentPromise = this.resolveShellEnvironment(shellEnvironmentArgs, process.env, true);
+		this.appInstantiationService?.invokeFunction(accessor => {
+			accessor.get(IVoidSpawnCommandService).setShellEnvironmentPromise(shellEnvironmentPromise);
+		});
 
 		// Crash reporter
 		this.updateCrashReporterEnablement();

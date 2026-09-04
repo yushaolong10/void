@@ -35,6 +35,22 @@ export class VoidSpawnCommandService implements IVoidSpawnCommandService {
 	readonly _serviceBrand: undefined;
 
 	private readonly _activeCommands = new Map<string, ActiveCommand>();
+	private _shellEnvironment: NodeJS.ProcessEnv = { ...process.env };
+	private _shellEnvironmentPromise: Promise<void> | undefined;
+
+	setShellEnvironment(environment: NodeJS.ProcessEnv): void {
+		if (Object.keys(environment).length > 0) {
+			this._shellEnvironment = { ...this._shellEnvironment, ...environment };
+		}
+	}
+
+	setShellEnvironmentPromise(environment: Promise<NodeJS.ProcessEnv>): void {
+		this._shellEnvironmentPromise = environment.then(resolvedEnvironment => {
+			this.setShellEnvironment(resolvedEnvironment);
+		}).catch(() => {
+			// Keep process.env as a safe fallback when shell environment resolution fails.
+		});
+	}
 
 	async abortCommand(commandId: string): Promise<void> {
 		const cmd = this._activeCommands.get(commandId);
@@ -44,13 +60,14 @@ export class VoidSpawnCommandService implements IVoidSpawnCommandService {
 	}
 
 	async runCommand(opts: ISpawnCommandOptions): Promise<ISpawnCommandResult> {
+		await this._shellEnvironmentPromise;
 		const { command, cwd, maxChars, idleTimeout, totalTimeout, commandId } = opts;
 		const { shell, shellArgs } = getShellCommand(command);
 
-		const env: Record<string, string | undefined> = { ...process.env };
+		const env: Record<string, string | undefined> = { ...this._shellEnvironment };
 		// Only set TERM on Unix – setting it on Windows can confuse native tools.
 		if (process.platform !== 'win32') {
-			env.TERM = process.env.TERM || 'xterm-256color';
+			env.TERM = this._shellEnvironment.TERM || 'xterm-256color';
 		}
 
 		const child: ChildProcess = spawn(shell, shellArgs, {

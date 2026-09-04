@@ -29,6 +29,11 @@ export interface ISpawnCommandResult {
 
 export interface IVoidSpawnCommandService {
 	readonly _serviceBrand: undefined;
+
+	/** Use the user's login-shell environment for subsequently spawned commands. */
+	setShellEnvironment(environment: NodeJS.ProcessEnv): void;
+	/** Wait for the user's login-shell environment before spawning a command. */
+	setShellEnvironmentPromise(environment: Promise<NodeJS.ProcessEnv>): void;
 	/**
 	 * Run a shell command using child_process.spawn instead of the VS Code terminal.
 	 * Output is captured with a ring buffer (head + tail) to avoid unbounded memory
