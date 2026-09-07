@@ -1709,9 +1709,18 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 				// llm res success
 				const { toolCalls, info } = llmRes
 
+				// The throttled stream state may still contain the last partial update.
+				// Publish it before committing the final message so the UI does not
+				// transition from stale streaming content directly to the committed one.
+				this._flushPendingLLMStreamState(threadId)
 				this._addMessageToThread(threadId, { role: 'assistant', displayContent: info.fullText, reasoning: info.fullReasoning, elapsedMs: elapsedMs(), anthropicReasoning: info.anthropicReasoning })
 
-				this._setStreamState(threadId, { isRunning: 'idle', interrupt: 'not_needed' }) // just decorative for clarity
+				// Keep the intermediate idle state only while tools are about to run. For a
+				// plain response, the final state transition below should be the only
+				// post-stream update visible to the UI.
+				if (toolCalls && toolCalls.length > 0) {
+					this._setStreamState(threadId, { isRunning: 'idle', interrupt: 'not_needed' })
+				}
 
 				// call tool if there is one
 				if (toolCalls && toolCalls.length > 0) {

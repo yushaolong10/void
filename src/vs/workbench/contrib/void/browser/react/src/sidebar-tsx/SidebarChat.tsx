@@ -3434,7 +3434,17 @@ export const SidebarChat = () => {
 
 	const streamingChatIdx = previousMessages.length
 	const compressingDisplayContent = isRunning === 'compressing' ? COMPRESSING_HISTORY_LABEL : ''
-	const currStreamingMessageHTML = reasoningSoFar || displayContentSoFar || compressingDisplayContent || isRunning ?
+	const lastPreviousMessage = previousMessages[previousMessages.length - 1]
+	const hasCommittedStreamingMessage = lastPreviousMessage?.role === 'assistant'
+		&& lastPreviousMessage.displayContent === (displayContentSoFar ?? '')
+		&& lastPreviousMessage.reasoning === (reasoningSoFar ?? '')
+
+	// The final assistant message is committed before the stream state is cleared.
+	// Do not render the same response twice during that transition: replacing a
+	// duplicate streaming bubble can cause a visible layout shift for users
+	// reading above the bottom of the conversation.
+	const currStreamingMessageHTML = !hasCommittedStreamingMessage
+		&& (reasoningSoFar || displayContentSoFar || compressingDisplayContent || isRunning) ?
 		<ChatBubble
 			key={'curr-streaming-msg'}
 			currCheckpointIdx={currCheckpointIdx}
